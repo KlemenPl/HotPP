@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 project(HotPP
-    VERSION 0.1.0
+    VERSION 1.0.0
     DESCRIPTION "Hot reload for C++ on Linux"
     LANGUAGES CXX)
 
@@ -101,6 +101,7 @@ if(HOTPP_BUILD_HOST)
     install(TARGETS hotpp EXPORT HotPPTargets RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 install(FILES include/hotpp/hotpp.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/hotpp)
+install(FILES LICENSE README.md CHANGELOG.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(FILES single_include/hotpp/hotpp.h DESTINATION ${CMAKE_INSTALL_DATADIR}/hotpp/single_include/hotpp)
 set(HOTPP_CMAKE_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/HotPP)
 install(EXPORT HotPPTargets NAMESPACE hotpp:: DESTINATION ${HOTPP_CMAKE_DIR})

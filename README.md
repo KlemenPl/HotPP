@@ -7,7 +7,7 @@ Hot reload for C++ on Linux. Save a source file while your program runs, and the
 
 HotPP works like Live++: it recompiles the changed files with your build's own commands, links them against the running process and redirects the old functions to the new ones.
 
-Requires Linux on x86-64 and GCC ≥ 11 or Clang ≥ 14. Building HotPP also needs CMake ≥ 3.25, and the tests need Python 3. How it works: [docs/DESIGN.md](docs/DESIGN.md).
+Version 1.0.0 ([changelog](CHANGELOG.md)). Requires Linux on x86-64 and GCC ≥ 11 or Clang ≥ 14. Building HotPP also needs CMake ≥ 3.25, and the tests need Python 3. How it works: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Build HotPP
 
@@ -132,7 +132,7 @@ It **warns** when a struct's layout changes (a header gains a member): objects c
 - **Restarting the host** is safe: running programs reconnect and the new host continues from the previous one's patches. If it can't (its saved state is gone), it says so; restart the program then.
 - **"was rebuilt since the program started":** the executable on disk no longer matches the running one. Restart the program, or use `--auto-restart`.
 - **Plugins** loaded with `dlopen` are picked up within about a second of loading, if they're built from sources in the same `compile_commands.json`.
-- **Not supported:** LTO, stripped binaries, `-Wl,--gc-sections`.
+- **Not supported:** LTO, stripped binaries, `-Wl,--gc-sections`, and programs not built with HotPP (they have to link the agent or the single header).
 
 ## Develop
 
@@ -146,3 +146,7 @@ CI (`.gitea/workflows/ci.yml`) runs the suite with GCC and Clang, Debug and Rele
 ```bash
 cmake --build build --target hotpp_single_header   # after changing the agent
 ```
+
+## License
+
+Proprietary. Copyright (c) 2026 HotPP contributors. All rights reserved. See [LICENSE](LICENSE).

@@ -1,6 +1,6 @@
 # HotPP — Design
 
-Status: M0, M1, M3, M4, M5.1 and M5.2 implemented; M2 (Windows) dropped · Last updated: 2026-11-05
+Status: version 1.0.0 · M0, M1, M3, M4, M5.1 and M5.2 implemented; M2 (Windows) and M5.3 (attach) dropped · Last updated: 2026-11-05
 
 HotPP is a hot-reload tool for C++ on Linux (x86-64, GCC and Clang). You edit a `.cpp` file or a header, save it, and the running program picks up the new code, typically within a fraction of a second. It doesn't restart and doesn't lose state.
 
@@ -25,7 +25,7 @@ Global and heap state stays where it is.
 - Windows, macOS, ARM64, 32-bit x86. Windows (the former M2) was dropped on 2026-11-05.
 - LTO (`-flto`).
 - Changing the layout of a struct or class while instances of it exist. HotPP reports *restart required* where it can detect such a change, and warns where it can only suspect one (§7.6).
-- Attaching to a process that doesn't link `hotpp_agent` (M5).
+- Attaching to a process that doesn't link `hotpp_agent` (M5.3, dropped). As with Live++, a program opts in by linking the agent or the single header.
 - Being a build system. HotPP uses the commands the real build recorded.
 
 ---
@@ -472,7 +472,7 @@ Defining `HOTPP_DISABLE` turns the whole API into inline no-ops.
 | **M4** | Usability: gdb JIT debug info, hooks, async mode, layout-change warnings, quieter console output | You can step through patched code in gdb (automated test). | done |
 | **M5.1** | Shared libraries: every module built from the project's sources is patched, with its own index and region | A `.so`'s globals (including copy-relocated ones), statics and `thread_local`s survive a patch; it can call back into the program (`shared_lib` case). | done |
 | **M5.2** | Hot restart: for changes that need a restart, rebuild with the user's build command and re-exec with the same command line | The program restarts on the new build from the host, without the user restarting it (`restart` case). | done |
-| **M5.3** | Attach: inject the agent into a running program built with the flags but without the agent (ptrace + `dlopen`) | A running program not linked with the agent gets patched. | |
+| **M5.3** | Attach to a running program that wasn't linked with the agent | — | dropped: programs link the agent or the single header, as with Live++ |
 
 Each milestone ends with a git commit, pushed to the Gitea remote, once its "done when" condition is met.
 

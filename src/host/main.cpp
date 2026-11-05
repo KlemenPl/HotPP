@@ -38,12 +38,14 @@ constexpr const char* kUsage =
     "  --build <command>   rebuild command for hot restarts (run with /bin/sh -c)\n"
     "  --auto-restart      rebuild and restart when a change can't be patched\n"
     "  -v, --verbose       full connect info and every binding decision\n"
+    "  --version           print the version and exit\n"
     "\n"
     "kill -USR1 <host pid> rebuilds and restarts every connected program.\n";
 
 struct Options {
     std::string endpoint;
     bool once = false;
+    bool version = false;
     host::HostOptions host;
     std::vector<std::string> program;
 };
@@ -57,6 +59,8 @@ bool parse_args(int argc, char** argv, Options& o) {
         }
         if (std::strcmp(a, "--endpoint") == 0 && i + 1 < argc) {
             o.endpoint = argv[++i];
+        } else if (std::strcmp(a, "--version") == 0) {
+            o.version = true;
         } else if (std::strcmp(a, "--once") == 0) {
             o.once = true;
         } else if (std::strcmp(a, "-v") == 0 || std::strcmp(a, "--verbose") == 0) {
@@ -139,6 +143,10 @@ int main(int argc, char** argv) {
     if (!parse_args(argc, argv, opt)) {
         std::fputs(kUsage, stderr);
         return 1;
+    }
+    if (opt.version) {
+        std::printf("hotpp %s\n", HOTPP_VERSION);
+        return 0;
     }
     const bool run_mode = !opt.program.empty();
     // Serve mode honours $HOTPP_ENDPOINT like the agent does. Run mode uses a private
