@@ -204,6 +204,4 @@ bool set_env(const char* name, const std::string& value) {
 
 uint32_t current_pid() { return uint32_t(::getpid()); }
 
-void init_console() {}
-
 } // namespace hotpp::host

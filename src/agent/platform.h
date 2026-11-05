@@ -1,4 +1,4 @@
-// OS layer of the agent. One implementation per platform: platform_linux.cpp, platform_win.cpp.
+// OS layer of the agent: platform_linux.cpp, threads_linux.cpp.
 #pragma once
 
 #include "common/messages.h"

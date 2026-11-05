@@ -169,12 +169,8 @@ bool init(const Config& cfg) {
 
     Hello hello;
     hello.pid = agent::current_pid();
-#if defined(_WIN32)
-    hello.platform = Platform::Windows;
-#else
     hello.platform = Platform::Linux;
-#endif
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__)
     hello.arch = Arch::X64;
 #endif
     hello.exe = agent::executable_path();

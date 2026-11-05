@@ -1,5 +1,5 @@
 // Bounds-checked reading of 64-bit little-endian ELF files. Own definitions instead
-// of <elf.h>, so the host builds on Windows too. Malformed input throws ElfError.
+// of <elf.h>, so nothing depends on the system headers. Malformed input throws ElfError.
 #pragma once
 
 #include <cstdint>

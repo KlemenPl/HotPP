@@ -15,7 +15,7 @@ struct Config {
     // Path to compile_commands.json. Overridden by $HOTPP_COMPILE_COMMANDS.
     const char* compile_commands = HOTPP_DEFAULT_COMPILE_COMMANDS;
     // Host endpoint (Unix socket path / named pipe name). Default: $HOTPP_ENDPOINT,
-    // then $XDG_RUNTIME_DIR/hotpp.sock (Linux) or \\.\pipe\hotpp (Windows).
+    // then $XDG_RUNTIME_DIR/hotpp.sock (or /tmp/hotpp-<uid>.sock).
     const char* endpoint = nullptr;
     // Host executable to launch when none is listening. Default: $HOTPP_HOST, then "hotpp" on PATH.
     const char* host_path = nullptr;

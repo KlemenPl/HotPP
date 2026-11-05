@@ -1,8 +1,8 @@
 # HotPP
 
-Hot reload for C++ on Linux and Windows. Edit a source file and the running program picks up the new code without restarting, keeping its state. It works like Live++: changed translation units are recompiled with their original commands and linked against the running process, and the old functions are redirected to the new ones.
+Hot reload for C++ on Linux (x86-64, GCC and Clang). Edit a source file and the running program picks up the new code without restarting, keeping its state. It works like Live++: changed translation units are recompiled with their original commands and linked against the running process, and the old functions are redirected to the new ones.
 
-**Status:** M3, Linux (GCC and Clang). Saving a `.cpp` file or a header of a running program patches it live. Changed functions are replaced, and globals, statics and `thread_local`s keep their values. New globals get initialized, and exceptions, virtual calls, lambdas and threads work across old and new code. Windows support (M2) is deferred. See [docs/DESIGN.md](docs/DESIGN.md) §11 for the roadmap and current limits.
+**Status:** M3, Linux (GCC and Clang). Saving a `.cpp` file or a header of a running program patches it live. Changed functions are replaced, and globals, statics and `thread_local`s keep their values. New globals get initialized, and exceptions, virtual calls, lambdas and threads work across old and new code. See [docs/DESIGN.md](docs/DESIGN.md) §11 for the roadmap and current limits.
 
 ## Build
 
@@ -12,14 +12,7 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Requires CMake ≥ 3.25 and GCC ≥ 11, Clang ≥ 14 or MSVC (VS 2022).
-
-To cross-check the Windows code from Linux with MinGW and Wine:
-
-```bash
-cmake -B build/mingw -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64.cmake
-cmake --build build/mingw -j && ctest --test-dir build/mingw
-```
+Requires Linux on x86-64, CMake ≥ 3.25, GCC ≥ 11 or Clang ≥ 14, and Python 3 for the end-to-end tests.
 
 ## Use
 

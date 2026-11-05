@@ -34,7 +34,7 @@ constexpr uint8_t kProtRead = 1;
 constexpr uint8_t kProtWrite = 2;
 constexpr uint8_t kProtExec = 4;
 
-enum class Platform : uint8_t { Unknown = 0, Linux = 1, Windows = 2 };
+enum class Platform : uint8_t { Unknown = 0, Linux = 1 };
 enum class Arch : uint8_t { Unknown = 0, X64 = 1 };
 enum class LogLevel : uint8_t { Info = 0, Warning = 1, Error = 2 };
 

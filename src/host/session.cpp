@@ -36,7 +36,6 @@ std::string format_size(uint64_t bytes) {
 const char* platform_name(Platform p) {
     switch (p) {
     case Platform::Linux: return "linux";
-    case Platform::Windows: return "windows";
     default: return "unknown-os";
     }
 }
@@ -219,7 +218,7 @@ Session::Outcome Session::run() {
 }
 
 void Session::start_hot_reload() {
-    if (hello_.platform != Platform::Linux) throw std::runtime_error("patching Windows processes arrives in M2");
+    if (hello_.platform != Platform::Linux) throw std::runtime_error("only Linux processes can be patched");
     if (hello_.arch != Arch::X64) throw std::runtime_error("only x86-64 is supported");
     if (hello_.compile_commands.empty())
         throw std::runtime_error("the app reported no compile_commands.json (use hotpp_enable() or set HOTPP_COMPILE_COMMANDS)");

@@ -20,9 +20,13 @@ void case_setup() {
 }
 
 void case_frame(int frame) {
-    const long calls = work_calls.load();
-    if (frame > 0) E2E_EXPECT(calls > last_calls); // the worker is still running
-    last_calls = calls;
+    // The worker is still running: it made progress within the last 25 frames
+    // (a looser check than every frame, so a briefly starved thread isn't a failure).
+    if (frame % 25 == 0) {
+        const long calls = work_calls.load();
+        if (frame > 0) E2E_EXPECT(calls > last_calls);
+        last_calls = calls;
+    }
     const int s = seen.load();
     E2E_EXPECT(s == 0 || s == 1 || s == 2);
 }

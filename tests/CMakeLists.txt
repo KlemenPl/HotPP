@@ -17,16 +17,14 @@ if(TARGET hotpp_host_lib)
     target_link_libraries(hotpp_unit_tests PRIVATE hotpp_host_lib)
 
     # The ELF tests link a real object file compiled the way patch compiles are.
-    if(NOT WIN32)
-        add_library(hotpp_test_link_sample OBJECT unit/data/link_sample.cpp)
-        target_compile_options(hotpp_test_link_sample PRIVATE
-            -O0 -fPIE -fpatchable-function-entry=7,5 -ffunction-sections -fdata-sections)
-        target_sources(hotpp_unit_tests PRIVATE unit/elf_test.cpp unit/linker_test.cpp)
-        target_compile_definitions(hotpp_unit_tests PRIVATE
-            "HOTPP_TEST_LINK_OBJECT=\"$<TARGET_OBJECTS:hotpp_test_link_sample>\""
-            "HOTPP_TEST_SOURCE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}\"")
-        add_dependencies(hotpp_unit_tests hotpp_test_link_sample)
-    endif()
+    add_library(hotpp_test_link_sample OBJECT unit/data/link_sample.cpp)
+    target_compile_options(hotpp_test_link_sample PRIVATE
+        -O0 -fPIE -fpatchable-function-entry=7,5 -ffunction-sections -fdata-sections)
+    target_sources(hotpp_unit_tests PRIVATE unit/elf_test.cpp unit/linker_test.cpp)
+    target_compile_definitions(hotpp_unit_tests PRIVATE
+        "HOTPP_TEST_LINK_OBJECT=\"$<TARGET_OBJECTS:hotpp_test_link_sample>\""
+        "HOTPP_TEST_SOURCE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}\"")
+    add_dependencies(hotpp_unit_tests hotpp_test_link_sample)
 endif()
 
 # End to end: the host starts the example, which must connect, report its modules
@@ -42,7 +40,7 @@ endif()
 # End to end: each case under e2e/cases runs under the host while run_case.py
 # swaps in newer versions of its sources; see e2e/run_case.py.
 find_package(Python3 COMPONENTS Interpreter)
-if(TARGET hotpp AND Python3_Interpreter_FOUND AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(TARGET hotpp AND Python3_Interpreter_FOUND)
     function(hotpp_e2e_case name)
         set(src ${CMAKE_CURRENT_SOURCE_DIR}/e2e/cases/${name})
         set(work ${CMAKE_CURRENT_BINARY_DIR}/e2e/${name})

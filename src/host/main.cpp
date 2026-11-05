@@ -84,7 +84,6 @@ void handle_client(std::unique_ptr<host::Stream> stream, Server* server) {
 } // namespace
 
 int main(int argc, char** argv) {
-    host::init_console();
     Options opt;
     if (!parse_args(argc, argv, opt)) {
         std::fputs(kUsage, stderr);

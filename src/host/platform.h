@@ -1,4 +1,4 @@
-// OS layer of the host. One implementation per platform: platform_linux.cpp, platform_win.cpp.
+// OS layer of the host (platform_linux.cpp).
 #pragma once
 
 #include <cstddef>
@@ -40,6 +40,5 @@ int run_capture(const std::vector<std::string>& argv, const std::filesystem::pat
 
 bool set_env(const char* name, const std::string& value);
 uint32_t current_pid();
-void init_console(); // UTF-8 console output where needed
 
 } // namespace hotpp::host

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 project(HotPP
     VERSION 0.1.0
-    DESCRIPTION "Hot reload for C++ on Linux and Windows"
+    DESCRIPTION "Hot reload for C++ on Linux"
     LANGUAGES CXX)
 
 option(HOTPP_BUILD_HOST     "Build the hotpp host executable" ON)
@@ -12,33 +12,24 @@ if(PROJECT_IS_TOP_LEVEL)
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 endif()
 
-if(NOT WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    message(FATAL_ERROR "HotPP supports Linux and Windows only (got ${CMAKE_SYSTEM_NAME})")
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    message(FATAL_ERROR "HotPP supports Linux on x86-64 only (got ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR})")
 endif()
 
 find_package(Threads REQUIRED)
 include(cmake/HotPP.cmake)
 
-if(MSVC)
-    set(HOTPP_WARNINGS /W4)
-else()
-    set(HOTPP_WARNINGS -Wall -Wextra)
-endif()
+set(HOTPP_WARNINGS -Wall -Wextra)
 
 # --- agent: static library linked into the target application ---------------
 add_library(hotpp_agent STATIC
     src/agent/agent.cpp
     src/agent/patcher.cpp
-    src/agent/region_select.cpp)
+    src/agent/platform_linux.cpp
+    src/agent/region_select.cpp
+    src/agent/threads_linux.cpp)
 add_library(hotpp::agent ALIAS hotpp_agent)
-
-if(WIN32)
-    target_sources(hotpp_agent PRIVATE src/agent/platform_win.cpp)
-    target_link_libraries(hotpp_agent PRIVATE psapi)
-else()
-    target_sources(hotpp_agent PRIVATE src/agent/platform_linux.cpp src/agent/threads_linux.cpp)
-    target_link_libraries(hotpp_agent PRIVATE ${CMAKE_DL_LIBS})
-endif()
+target_link_libraries(hotpp_agent PRIVATE ${CMAKE_DL_LIBS})
 
 target_include_directories(hotpp_agent
     PUBLIC  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -46,9 +37,6 @@ target_include_directories(hotpp_agent
 target_compile_features(hotpp_agent PUBLIC cxx_std_17)
 target_compile_options(hotpp_agent PRIVATE ${HOTPP_WARNINGS})
 target_link_libraries(hotpp_agent PRIVATE Threads::Threads)
-if(WIN32)
-    target_compile_definitions(hotpp_agent PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
-endif()
 
 # --- host: the hotpp executable ----------------------------------------------
 if(HOTPP_BUILD_HOST)
@@ -64,13 +52,9 @@ if(HOTPP_BUILD_HOST)
         src/host/link/patch_site.cpp
         src/host/link/symbol_index.cpp
         src/host/object/elf_object.cpp
-        src/host/util/json.cpp)
-    if(WIN32)
-        target_sources(hotpp_host_lib PRIVATE src/host/platform_win.cpp src/host/watcher_win.cpp)
-        target_compile_definitions(hotpp_host_lib PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
-    else()
-        target_sources(hotpp_host_lib PRIVATE src/host/platform_linux.cpp src/host/watcher_linux.cpp)
-    endif()
+        src/host/platform_linux.cpp
+        src/host/util/json.cpp
+        src/host/watcher_linux.cpp)
     target_include_directories(hotpp_host_lib PUBLIC ${PROJECT_SOURCE_DIR}/src)
     target_compile_features(hotpp_host_lib PUBLIC cxx_std_20)
     target_compile_definitions(hotpp_host_lib PUBLIC HOTPP_VERSION="${PROJECT_VERSION}")
