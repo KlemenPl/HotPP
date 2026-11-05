@@ -1,0 +1,21 @@
+{
+  "steps": [
+    {
+      "name": "the program loads the plugin",
+      "copy": {},
+      "expect": "^\\[hotpp\\] watching 1 source file of libhotpp_e2e_dlopen_plugin_plugin\\.so \\(loaded at runtime\\)"
+    },
+    {
+      "name": "patch the plugin",
+      "copy": {
+        "plugin_logic.cpp": "v2/plugin_logic.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied"
+    },
+    {
+      "name": "the program unloads it",
+      "copy": {},
+      "expect": "^\\[hotpp\\] stopped patching libhotpp_e2e_dlopen_plugin_plugin\\.so \\(unloaded\\)"
+    }
+  ]
+}

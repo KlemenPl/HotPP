@@ -137,7 +137,7 @@ struct HookRegistrar {
 namespace hotpp::proto {
 
 constexpr uint32_t kMagic = 0x50544F48; // "HOTP"
-constexpr uint16_t kVersion = 7;
+constexpr uint16_t kVersion = 8;
 constexpr size_t kHeaderSize = 12;
 constexpr uint32_t kMaxPayload = 1u << 30;
 
@@ -153,6 +153,7 @@ enum class MsgType : uint16_t {
     ReserveRequest = 9, // host -> agent: reserve a patch region next to a module
     ReserveReply = 10,  // agent -> host
     Restart = 11,       // host -> agent: exec the (rebuilt) executable again
+    ModulesChanged = 12, // agent -> host: libraries were loaded or unloaded (dlopen/dlclose)
 };
 
 // Memory protection bits used in Patch segments.
@@ -390,6 +391,14 @@ struct PatchResult {
     std::string error;
 };
 
+// Modules keep their index for the life of the process: loaded ones are appended
+// (starting at first_index), unloaded ones are listed and never reused.
+struct ModulesChanged {
+    uint32_t first_index = 0;
+    std::vector<ModuleRecord> added;
+    std::vector<uint32_t> removed;
+};
+
 struct ReserveRequest {
     uint32_t id = 0;
     uint32_t module_index = 0;
@@ -587,6 +596,50 @@ inline bool decode(Reader& r, PatchResult& m) {
     return r.ok() && r.at_end();
 }
 
+inline void put_module(Writer& w, const ModuleRecord& mod) {
+    w.u64(mod.base);
+    w.u64(mod.start);
+    w.u64(mod.size);
+    put(w, mod.path);
+    put_bytes(w, mod.build_id);
+    w.u64(mod.tls_module_id);
+    w.u64(uint64_t(mod.tls_offset));
+    w.u8(mod.tls_static ? 1 : 0);
+}
+
+inline ModuleRecord get_module(Reader& r) {
+    ModuleRecord mod;
+    mod.base = r.u64();
+    mod.start = r.u64();
+    mod.size = r.u64();
+    mod.path = get_string(r);
+    mod.build_id = get_bytes(r);
+    mod.tls_module_id = r.u64();
+    mod.tls_offset = int64_t(r.u64());
+    mod.tls_static = r.u8() != 0;
+    return mod;
+}
+
+inline void encode(Writer& w, const ModulesChanged& m) {
+    w.u32(m.first_index);
+    w.u32(uint32_t(m.added.size()));
+    for (const ModuleRecord& mod : m.added) put_module(w, mod);
+    w.u32(uint32_t(m.removed.size()));
+    for (uint32_t i : m.removed) w.u32(i);
+}
+
+inline bool decode(Reader& r, ModulesChanged& m) {
+    m.first_index = r.u32();
+    uint32_t added = r.u32();
+    if (!r.ok() || added > r.remaining() / 45) return false;
+    for (uint32_t i = 0; i < added && r.ok(); ++i) m.added.push_back(get_module(r));
+    uint32_t removed = r.u32();
+    if (!r.ok() || removed > r.remaining() / 4) return false;
+    m.removed.resize(removed);
+    for (uint32_t& i : m.removed) i = r.u32();
+    return r.ok() && r.at_end();
+}
+
 inline void encode(Writer& w, const ReserveRequest& m) {
     w.u32(m.id);
     w.u32(m.module_index);
@@ -693,6 +746,9 @@ std::string get_env(const char* name); // empty if unset
 
 // All loaded modules; element 0 is the main executable.
 std::vector<proto::ModuleRecord> enumerate_modules();
+// The dynamic linker's running counts of loaded and unloaded objects; a cheap way
+// to tell that enumerate_modules() would return something new.
+void module_counters(uint64_t& adds, uint64_t& subs);
 
 // Reserves `size` bytes of inaccessible address space within rel32 reach of `module`.
 bool reserve_near(const proto::ModuleRecord& module, uint64_t size, proto::RegionRecord& out);
@@ -727,6 +783,8 @@ Connection* ipc_connect(const std::string& endpoint);
 bool ipc_send(Connection* c, const void* data, size_t size);
 bool ipc_recv(Connection* c, void* data, size_t size);
 void ipc_shutdown(Connection* c); // unblocks a pending ipc_recv on another thread
+// Waits up to `ms` for data (or the end of the connection) to arrive.
+bool ipc_readable(Connection* c, int ms);
 void ipc_close(Connection* c);
 
 // The command line the process was started with (/proc/self/cmdline).
@@ -846,6 +904,7 @@ std::vector<uint64_t> near_region_candidates(const std::vector<AddressRange>& fr
 #include <cerrno>
 #include <climits>
 #include <cstdio>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -853,6 +912,7 @@ std::vector<uint64_t> near_region_candidates(const std::vector<AddressRange>& fr
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <link.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -981,6 +1041,24 @@ std::vector<proto::ModuleRecord> enumerate_modules() {
     return modules;
 }
 
+void module_counters(uint64_t& adds, uint64_t& subs) {
+    struct Counters {
+        uint64_t adds = 0, subs = 0;
+    } c;
+    dl_iterate_phdr(
+        [](dl_phdr_info* info, size_t size, void* data) {
+            auto* out = static_cast<Counters*>(data);
+            if (size >= offsetof(dl_phdr_info, dlpi_subs) + sizeof(info->dlpi_subs)) {
+                out->adds = info->dlpi_adds;
+                out->subs = info->dlpi_subs;
+            }
+            return 1; // the counters are the same in every entry
+        },
+        &c);
+    adds = c.adds;
+    subs = c.subs;
+}
+
 bool reserve_near(const proto::ModuleRecord& module, uint64_t size, proto::RegionRecord& out) {
     constexpr uint64_t kAlignment = 64 * 1024;
     constexpr uint64_t kAboveGuard = uint64_t(64) << 20; // room for the brk heap
@@ -1078,6 +1156,11 @@ bool ipc_recv(Connection* c, void* data, size_t size) {
 }
 
 void ipc_shutdown(Connection* c) { shutdown(c->fd, SHUT_RDWR); }
+
+bool ipc_readable(Connection* c, int ms) {
+    pollfd p{c->fd, POLLIN, 0};
+    return ::poll(&p, 1, ms) != 0; // ready, closed, or an error: let recv find out
+}
 
 void ipc_close(Connection* c) {
     close(c->fd);
@@ -1623,7 +1706,8 @@ struct AgentState {
     agent::Thread* reader = nullptr;
     std::mutex region_mutex;
     std::vector<RegionRecord> regions; // kept until process exit: patch code lives here
-    std::vector<ModuleRecord> modules; // as reported in the hello
+    std::vector<ModuleRecord> modules; // index-stable; unloaded ones keep their slot with size 0
+    uint64_t module_adds = 0, module_subs = 0;
     std::atomic<bool> connected{false};
     bool initialized = false;
 
@@ -1732,11 +1816,13 @@ void apply_and_report(const Patch& patch) {
     PatchResult result;
     result.id = patch.id;
     std::vector<RegionRecord> regions;
+    std::vector<ModuleRecord> modules; // the agent thread may add some meanwhile
     {
         std::lock_guard<std::mutex> lock(s.region_mutex);
         regions = s.regions;
+        modules = s.modules;
     }
-    result.error = agent::apply_patch(patch, regions, s.modules);
+    result.error = agent::apply_patch(patch, regions, modules);
     result.ok = result.error.empty();
     {
         // How much of each region is taken, so a host that reconnects later doesn't
@@ -1756,12 +1842,53 @@ void apply_and_report(const Patch& patch) {
 
 bool reconnect();
 
+// Libraries loaded or unloaded since the last look (dlopen/dlclose) go to the host,
+// which starts or stops patching them. Unloaded modules keep their index, with an
+// empty span so nothing validates against them any more.
+void check_modules() {
+    AgentState& s = state();
+    uint64_t adds = 0, subs = 0;
+    agent::module_counters(adds, subs);
+    if (adds == s.module_adds && subs == s.module_subs) return;
+    s.module_adds = adds;
+    s.module_subs = subs;
+    const std::vector<ModuleRecord> now = agent::enumerate_modules();
+    ModulesChanged change;
+    auto same = [](const ModuleRecord& a, const ModuleRecord& b) { return a.start == b.start && a.path == b.path; };
+    {
+        std::lock_guard<std::mutex> lock(s.region_mutex);
+        for (uint32_t i = 1; i < s.modules.size(); ++i) {
+            ModuleRecord& m = s.modules[i];
+            if (m.size == 0) continue;
+            if (std::none_of(now.begin(), now.end(), [&](const ModuleRecord& n) { return same(n, m); })) {
+                change.removed.push_back(i);
+                m.size = 0;
+            }
+        }
+        change.first_index = uint32_t(s.modules.size());
+        for (const ModuleRecord& n : now)
+            if (std::none_of(s.modules.begin(), s.modules.end(), [&](const ModuleRecord& m) { return m.size && same(n, m); })) {
+                change.added.push_back(n);
+                s.modules.push_back(n);
+            }
+        s.hello.modules = s.modules;
+    }
+    if (change.added.empty() && change.removed.empty()) return;
+    Writer w;
+    encode(w, change);
+    send_message(s, MsgType::ModulesChanged, w);
+}
+
 // Serves one connection until it ends.
 void serve_connection() {
     AgentState& s = state();
     Header h;
     std::vector<uint8_t> payload;
-    while (recv_message(s, h, payload)) {
+    for (;;) {
+        // While idle, look for libraries loaded or unloaded meanwhile.
+        bool ready = false;
+        while (!s.stopping && !(ready = agent::ipc_readable(s.conn, 1000))) check_modules();
+        if (!ready || !recv_message(s, h, payload)) break;
         if (h.type == MsgType::Bye) break;
         Reader r(payload.data(), payload.size());
         if (h.type == MsgType::Log) {
@@ -1967,6 +2094,7 @@ bool init(const Config& cfg) {
     hello.regions = s.regions;
     s.modules = hello.modules;
     s.hello = hello;
+    agent::module_counters(s.module_adds, s.module_subs);
 
     const std::string endpoint = pick(cfg.endpoint, "HOTPP_ENDPOINT", default_endpoint());
     s.endpoint = endpoint;

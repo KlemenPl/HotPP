@@ -19,6 +19,9 @@ std::string get_env(const char* name); // empty if unset
 
 // All loaded modules; element 0 is the main executable.
 std::vector<proto::ModuleRecord> enumerate_modules();
+// The dynamic linker's running counts of loaded and unloaded objects; a cheap way
+// to tell that enumerate_modules() would return something new.
+void module_counters(uint64_t& adds, uint64_t& subs);
 
 // Reserves `size` bytes of inaccessible address space within rel32 reach of `module`.
 bool reserve_near(const proto::ModuleRecord& module, uint64_t size, proto::RegionRecord& out);
@@ -53,6 +56,8 @@ Connection* ipc_connect(const std::string& endpoint);
 bool ipc_send(Connection* c, const void* data, size_t size);
 bool ipc_recv(Connection* c, void* data, size_t size);
 void ipc_shutdown(Connection* c); // unblocks a pending ipc_recv on another thread
+// Waits up to `ms` for data (or the end of the connection) to arrive.
+bool ipc_readable(Connection* c, int ms);
 void ipc_close(Connection* c);
 
 // The command line the process was started with (/proc/self/cmdline).

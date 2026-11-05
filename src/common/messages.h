@@ -82,6 +82,14 @@ struct PatchResult {
     std::string error;
 };
 
+// Modules keep their index for the life of the process: loaded ones are appended
+// (starting at first_index), unloaded ones are listed and never reused.
+struct ModulesChanged {
+    uint32_t first_index = 0;
+    std::vector<ModuleRecord> added;
+    std::vector<uint32_t> removed;
+};
+
 struct ReserveRequest {
     uint32_t id = 0;
     uint32_t module_index = 0;
@@ -276,6 +284,50 @@ inline bool decode(Reader& r, PatchResult& m) {
     m.id = r.u32();
     m.ok = r.u8() != 0;
     m.error = get_string(r);
+    return r.ok() && r.at_end();
+}
+
+inline void put_module(Writer& w, const ModuleRecord& mod) {
+    w.u64(mod.base);
+    w.u64(mod.start);
+    w.u64(mod.size);
+    put(w, mod.path);
+    put_bytes(w, mod.build_id);
+    w.u64(mod.tls_module_id);
+    w.u64(uint64_t(mod.tls_offset));
+    w.u8(mod.tls_static ? 1 : 0);
+}
+
+inline ModuleRecord get_module(Reader& r) {
+    ModuleRecord mod;
+    mod.base = r.u64();
+    mod.start = r.u64();
+    mod.size = r.u64();
+    mod.path = get_string(r);
+    mod.build_id = get_bytes(r);
+    mod.tls_module_id = r.u64();
+    mod.tls_offset = int64_t(r.u64());
+    mod.tls_static = r.u8() != 0;
+    return mod;
+}
+
+inline void encode(Writer& w, const ModulesChanged& m) {
+    w.u32(m.first_index);
+    w.u32(uint32_t(m.added.size()));
+    for (const ModuleRecord& mod : m.added) put_module(w, mod);
+    w.u32(uint32_t(m.removed.size()));
+    for (uint32_t i : m.removed) w.u32(i);
+}
+
+inline bool decode(Reader& r, ModulesChanged& m) {
+    m.first_index = r.u32();
+    uint32_t added = r.u32();
+    if (!r.ok() || added > r.remaining() / 45) return false;
+    for (uint32_t i = 0; i < added && r.ok(); ++i) m.added.push_back(get_module(r));
+    uint32_t removed = r.u32();
+    if (!r.ok() || removed > r.remaining() / 4) return false;
+    m.removed.resize(removed);
+    for (uint32_t& i : m.removed) i = r.u32();
     return r.ok() && r.at_end();
 }
 

@@ -131,7 +131,8 @@ It **warns** when a struct's layout changes (a header gains a member): objects c
 - **gdb stops with SIG38 while patching:** HotPP pauses threads with that signal. Run `handle SIG38 nostop noprint pass`.
 - **Restarting the host** is safe: running programs reconnect and the new host continues from the previous one's patches. If it can't (its saved state is gone), it says so; restart the program then.
 - **"was rebuilt since the program started":** the executable on disk no longer matches the running one. Restart the program, or use `--auto-restart`.
-- **Not supported:** LTO, stripped binaries, `-Wl,--gc-sections`, and shared libraries loaded with `dlopen` after startup.
+- **Plugins** loaded with `dlopen` are picked up within about a second of loading, if they're built from sources in the same `compile_commands.json`.
+- **Not supported:** LTO, stripped binaries, `-Wl,--gc-sections`.
 
 ## Develop
 

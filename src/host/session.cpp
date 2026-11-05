@@ -262,6 +262,13 @@ Session::Outcome Session::run() {
                     results_[res.id] = res;
                 }
                 reply_cv_.notify_all();
+            } else if (h.type == MsgType::ModulesChanged) {
+                ModulesChanged change;
+                if (decode(mr, change)) {
+                    std::lock_guard<std::mutex> lock(reply_mutex_);
+                    module_changes_.push_back(std::move(change));
+                    has_module_changes_ = true;
+                }
             } else if (h.type == MsgType::ReserveReply) {
                 ReserveReply rep;
                 if (decode(mr, rep)) {
@@ -324,60 +331,67 @@ bool system_library(const std::string& path) {
 }
 } // namespace
 
-void Session::setup_modules() {
-    for (size_t i = 0; i < hello_.modules.size() && !stop_; ++i) {
-        const ModuleRecord& rec = hello_.modules[i];
-        const bool exe = i == 0;
-        if (!exe && system_library(rec.path)) continue;
-        auto m = std::make_unique<ModuleState>();
-        m->index = i;
-        m->name = fs::path(rec.path).filename().string();
-        try {
-            m->image = image::ElfImage::load(rec.path);
-        } catch (const std::exception&) {
-            if (exe) throw;
-            continue; // stripped or unreadable: not ours
-        }
-        for (const fs::path& cu : m->image->compile_units()) m->units.insert(normalize_path(cu));
-        bool ours = false;
-        for (const fs::path& u : m->units) ours |= db_->find(u) != nullptr;
-        if (exe && m->units.empty()) {
-            say("warning: " + m->name + " has no usable DWARF info" +
-                (m->image->dwarf_warning().empty() ? "" : " (" + m->image->dwarf_warning() + ")") +
-                "; every file in compile_commands.json is treated as part of it");
-            for (const CompileCommand& c : db_->entries()) m->units.insert(c.file);
-            ours = true;
-        }
-        if (!ours) {
-            if (exe) throw std::runtime_error("none of the sources " + m->name + " was built from are in " + hello_.compile_commands);
-            continue;
-        }
-        if (!rec.build_id.empty() && !m->image->build_id().empty() && rec.build_id != m->image->build_id()) {
-            if (exe) throw std::runtime_error(rec.path + " was rebuilt since the program started; restart it to hot reload");
-            say("warning: " + rec.path + " was rebuilt since it was loaded; not patching it");
-            continue;
-        }
-        RegionRecord region;
-        const auto existing = std::find_if(hello_.regions.begin(), hello_.regions.end(),
-                                           [&](const RegionRecord& r) { return r.module_index == i; });
-        if (existing != hello_.regions.end()) {
-            region = *existing; // the executable's, or one reserved for an earlier host session
-        } else if (exe) {
-            throw std::runtime_error("the app reported no patch region for " + m->name);
-        } else if (auto r = reserve_region(uint32_t(i), hello_.regions[0].size)) {
-            region = *r;
-        } else {
-            say("warning: no room for a patch region next to " + m->name + "; not patching it");
-            continue;
-        }
-        m->region_base = region.base;
-        m->cursor = region.base + region.used;
-        m->end = region.base + region.size;
-        m->symbols.add_image(*m->image, rec.base);
-        if (!exe) bind_interposed_variables(*m);
-        for (const fs::path& u : m->units) units_.insert(u);
-        modules_.push_back(std::move(m));
+// Starts tracking module i if it's built from sources in compile_commands.json.
+// Returns it (also added to modules_), or nullptr if it isn't ours or can't be
+// patched. Problems with the executable throw.
+Session::ModuleState* Session::track_module(size_t i) {
+    const ModuleRecord& rec = hello_.modules[i];
+    const bool exe = i == 0;
+    if (rec.size == 0 || (!exe && system_library(rec.path))) return nullptr;
+    auto m = std::make_unique<ModuleState>();
+    m->index = i;
+    m->name = fs::path(rec.path).filename().string();
+    try {
+        m->image = image::ElfImage::load(rec.path);
+    } catch (const std::exception&) {
+        if (exe) throw;
+        return nullptr; // stripped or unreadable: not ours
     }
+    for (const fs::path& cu : m->image->compile_units()) m->units.insert(normalize_path(cu));
+    bool ours = false;
+    for (const fs::path& u : m->units) ours |= db_->find(u) != nullptr;
+    if (exe && m->units.empty()) {
+        say("warning: " + m->name + " has no usable DWARF info" +
+            (m->image->dwarf_warning().empty() ? "" : " (" + m->image->dwarf_warning() + ")") +
+            "; every file in compile_commands.json is treated as part of it");
+        for (const CompileCommand& c : db_->entries()) m->units.insert(c.file);
+        ours = true;
+    }
+    if (!ours) {
+        if (exe) throw std::runtime_error("none of the sources " + m->name + " was built from are in " + hello_.compile_commands);
+        return nullptr;
+    }
+    if (!rec.build_id.empty() && !m->image->build_id().empty() && rec.build_id != m->image->build_id()) {
+        if (exe) throw std::runtime_error(rec.path + " was rebuilt since the program started; restart it to hot reload");
+        say("warning: " + rec.path + " was rebuilt since it was loaded; not patching it");
+        return nullptr;
+    }
+    RegionRecord region;
+    const auto existing = std::find_if(hello_.regions.begin(), hello_.regions.end(),
+                                       [&](const RegionRecord& r) { return r.module_index == i; });
+    if (existing != hello_.regions.end()) {
+        region = *existing; // the executable's, or one reserved for an earlier host session
+    } else if (exe) {
+        throw std::runtime_error("the app reported no patch region for " + m->name);
+    } else if (auto r = reserve_region(uint32_t(i), hello_.regions[0].size)) {
+        region = *r;
+        hello_.regions.push_back(region);
+    } else {
+        say("warning: no room for a patch region next to " + m->name + "; not patching it");
+        return nullptr;
+    }
+    m->region_base = region.base;
+    m->cursor = region.base + region.used;
+    m->end = region.base + region.size;
+    m->symbols.add_image(*m->image, rec.base);
+    if (!exe) bind_interposed_variables(*m);
+    for (const fs::path& u : m->units) units_.insert(u);
+    modules_.push_back(std::move(m));
+    return modules_.back().get();
+}
+
+void Session::setup_modules() {
+    for (size_t i = 0; i < hello_.modules.size() && !stop_; ++i) track_module(i);
 
     resume_or_reset();
 
@@ -547,11 +561,64 @@ void Session::watch_headers() {
     }
 }
 
+// Libraries the program loaded or unloaded at runtime (dlopen/dlclose).
+void Session::apply_module_changes() {
+    std::vector<ModulesChanged> changes;
+    {
+        std::lock_guard<std::mutex> lock(reply_mutex_);
+        changes.swap(module_changes_);
+    }
+    for (const ModulesChanged& c : changes) {
+        for (uint32_t i : c.removed) {
+            if (i >= hello_.modules.size()) continue;
+            hello_.modules[i].size = 0;
+            auto it = std::find_if(modules_.begin(), modules_.end(), [&](const auto& m) { return m->index == i; });
+            if (it == modules_.end()) continue;
+            say("stopped patching " + (*it)->name + " (unloaded)");
+            modules_.erase(it);
+        }
+        units_.clear();
+        for (const auto& m : modules_) units_.insert(m->units.begin(), m->units.end());
+
+        hello_.modules.resize(c.first_index); // the agent's indices; extra slots would be placeholders
+        for (const ModuleRecord& rec : c.added) hello_.modules.push_back(rec);
+        for (size_t i = c.first_index; i < hello_.modules.size(); ++i) {
+            ModuleState* m = nullptr;
+            try {
+                m = track_module(i);
+            } catch (const std::exception& e) {
+                say("warning: can't patch " + hello_.modules[i].path + ": " + e.what());
+            }
+            if (!m) continue;
+            std::vector<const CompileCommand*> sources;
+            for (const fs::path& u : m->units)
+                if (const CompileCommand* cmd = db_->find(u)) {
+                    sources.push_back(cmd);
+                    content_hash_.emplace(cmd->file.string(), std::hash<std::string>()(read_file(cmd->file)));
+                    if (watched_dirs_.insert(cmd->file.parent_path()).second) {
+                        std::string error;
+                        if (!watcher_->add(cmd->file.parent_path(), error)) say("warning: " + error);
+                    }
+                }
+            scan_dependencies(sources, fs::path(hello_.compile_commands).parent_path() / ".hotpp" / "deps",
+                              std::max(1u, std::thread::hardware_concurrency()), graph_, &stop_);
+            watch_headers();
+            try {
+                m->layouts = image::dwarf_type_layouts(m->image->file());
+                m->layouts_ok = true;
+            } catch (const std::exception&) {
+            }
+            say("watching " + plural(sources.size(), "source file") + " of " + m->name + " (loaded at runtime)");
+        }
+    }
+}
+
 void Session::watch_loop() {
     using namespace std::chrono_literals;
     bool headers_watched = false;
     int restarts_seen = g_restart_requests.load();
     while (!stop_) {
+        if (has_module_changes_.exchange(false)) apply_module_changes();
         if (g_restart_requests.load() != restarts_seen) {
             restarts_seen = g_restart_requests.load();
             hot_restart("requested");

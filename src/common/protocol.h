@@ -14,7 +14,7 @@
 namespace hotpp::proto {
 
 constexpr uint32_t kMagic = 0x50544F48; // "HOTP"
-constexpr uint16_t kVersion = 7;
+constexpr uint16_t kVersion = 8;
 constexpr size_t kHeaderSize = 12;
 constexpr uint32_t kMaxPayload = 1u << 30;
 
@@ -30,6 +30,7 @@ enum class MsgType : uint16_t {
     ReserveRequest = 9, // host -> agent: reserve a patch region next to a module
     ReserveReply = 10,  // agent -> host
     Restart = 11,       // host -> agent: exec the (rebuilt) executable again
+    ModulesChanged = 12, // agent -> host: libraries were loaded or unloaded (dlopen/dlclose)
 };
 
 // Memory protection bits used in Patch segments.

@@ -26,7 +26,6 @@ Global and heap state stays where it is.
 - LTO (`-flto`).
 - Changing the layout of a struct or class while instances of it exist. HotPP reports *restart required* where it can detect such a change, and warns where it can only suspect one (§7.6).
 - Attaching to a process that doesn't link `hotpp_agent` (M5).
-- Patching shared libraries the program `dlopen`s after it connected to the host.
 - Being a build system. HotPP uses the commands the real build recorded.
 
 ---
@@ -100,6 +99,7 @@ The host listens and agents connect. One host serves any number of agents.
 | `Patch` | host → agent | segments, patch sites, `.eh_frame` blocks, initializers, debug objects |
 | `PatchResult` | agent → host | id, ok, error |
 | `Restart` | host → agent | re-exec the (rebuilt) executable (§8.8) |
+| `ModulesChanged` | agent → host | libraries loaded or unloaded at runtime (§6) |
 | `Log`, `Bye` | both | text for the user; orderly disconnect |
 
 ### 3.3 Host restarts and reconnecting
@@ -192,6 +192,12 @@ The host patches every loaded module (the executable and shared libraries) that 
 - The executable is always tracked.
 
 Each tracked module gets its own symbol index, patch region and source set. A changed source is linked against every module built from it, and the results go out as one patch.
+
+**Libraries loaded at runtime.** While idle, the agent thread checks the dynamic linker's load/unload counters (`dlpi_adds`, `dlpi_subs`) about once a second. When they change, it sends `ModulesChanged`, listing the modules that appeared and the indices of those that went away. Module indices stay stable for the life of the process: new modules are appended, and unloaded ones keep their slot with an empty span, so no patch site validates against them. The host:
+- tracks a new module like the startup ones (a region via `ReserveRequest`, a symbol index, watched sources, a dependency scan, layouts)
+- stops patching a module once it is unloaded
+
+The module list in a resumed hello includes runtime-loaded modules, so a restarted host picks them up too.
 
 Each index maps identity key → runtime address, size, kind and writability. It is read once from the module's file on disk, plus the load bias the agent reports. Each applied patch adds to it (§7.5).
 
@@ -477,7 +483,7 @@ Each milestone ends with a git commit, pushed to the Gitea remote, once its "don
 - New `thread_local` variables, resized or retyped globals, and new direct references to shared-library variables need a restart.
 - `__attribute__((destructor))` functions in a patch aren't registered.
 - Threads that block real-time signals can't be paused, so patches fail while such threads exist.
-- Shared libraries loaded with `dlopen` after the program connected aren't patched.
+- A library unloaded with `dlclose` and loaded again is a new module: patches applied to its earlier copy are gone.
 
 ---
 
@@ -528,6 +534,7 @@ The program checks its invariants every frame (state never resets, old and new r
 | `shared_lib` | Code in a shared library (`lib_*.cpp` in the case) is patched: its global (copy-relocated into the executable), `static` and `thread_local` keep their values, and it calls back into the executable. |
 | `restart` | A resized global is rebuilt and restarted with `--build … --auto-restart`; the pre-restart hook saves state, the restarted process (same pid) sees `restarted()`, reads it back and runs the new code. The harness rebuilds the program from v1 afterwards. |
 | `single_header` | A program built with only the single header (no agent library, no `compile_commands.json` path built in) connects, finds `compile_commands.json` itself, is patched and runs its hook. |
+| `dlopen_plugin` | A library the program `dlopen`s after connecting is picked up, patched (its `static` keeps counting) and dropped once it's `dlclose`d. |
 | `host_restart` | The host is killed (`SIGKILL`) and restarted, later stopped (`SIGTERM`) and restarted; each time the agent reconnects, the new host resumes the patch history (numbering, function versions, a variable a patch added), and further patches apply with all state intact. |
 | `install_and_consume` (not an e2e case) | Installs HotPP into a temporary prefix, builds a separate `find_package(HotPP)` project against it and runs it under the installed host. |
 | `gdb_step` | Under gdb: a breakpoint in new code, locals and kept globals, a backtrace into old code, `finish` (§9). Runs only if gdb is installed. |

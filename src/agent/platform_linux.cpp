@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <climits>
 #include <cstdio>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -12,6 +13,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <link.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -140,6 +142,24 @@ std::vector<proto::ModuleRecord> enumerate_modules() {
     return modules;
 }
 
+void module_counters(uint64_t& adds, uint64_t& subs) {
+    struct Counters {
+        uint64_t adds = 0, subs = 0;
+    } c;
+    dl_iterate_phdr(
+        [](dl_phdr_info* info, size_t size, void* data) {
+            auto* out = static_cast<Counters*>(data);
+            if (size >= offsetof(dl_phdr_info, dlpi_subs) + sizeof(info->dlpi_subs)) {
+                out->adds = info->dlpi_adds;
+                out->subs = info->dlpi_subs;
+            }
+            return 1; // the counters are the same in every entry
+        },
+        &c);
+    adds = c.adds;
+    subs = c.subs;
+}
+
 bool reserve_near(const proto::ModuleRecord& module, uint64_t size, proto::RegionRecord& out) {
     constexpr uint64_t kAlignment = 64 * 1024;
     constexpr uint64_t kAboveGuard = uint64_t(64) << 20; // room for the brk heap
@@ -237,6 +257,11 @@ bool ipc_recv(Connection* c, void* data, size_t size) {
 }
 
 void ipc_shutdown(Connection* c) { shutdown(c->fd, SHUT_RDWR); }
+
+bool ipc_readable(Connection* c, int ms) {
+    pollfd p{c->fd, POLLIN, 0};
+    return ::poll(&p, 1, ms) != 0; // ready, closed, or an error: let recv find out
+}
 
 void ipc_close(Connection* c) {
     close(c->fd);

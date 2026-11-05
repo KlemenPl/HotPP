@@ -69,6 +69,8 @@ private:
 
     void start_hot_reload();
     void setup_modules();
+    ModuleState* track_module(size_t index);
+    void apply_module_changes();
     void resume_or_reset();
     void save_state();
     std::optional<proto::RegionRecord> reserve_region(uint32_t module_index, uint64_t size);
@@ -117,6 +119,8 @@ private:
     std::map<uint32_t, proto::PatchResult> results_;
     std::map<uint32_t, proto::ResolveReply> resolved_;
     std::map<uint32_t, proto::ReserveReply> reserved_;
+    std::vector<proto::ModulesChanged> module_changes_; // for the watcher thread
+    std::atomic<bool> has_module_changes_{false};
     bool disconnected_ = false;
 };
 
