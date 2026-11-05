@@ -2,11 +2,12 @@
 
 Hot reload for C++ on Linux (x86-64, GCC and Clang). Edit a source file and the running program picks up the new code without restarting, keeping its state. It works like Live++: changed translation units are recompiled with their original commands and linked against the running process, and the old functions are redirected to the new ones.
 
-**Status:** M4. Saving a `.cpp` file or a header of a running program patches it live:
+**Status:** M5.2. Saving a `.cpp` file or a header of a running program patches it live:
 - changed functions are replaced, while globals, statics and `thread_local`s keep their values
 - new globals get initialized
 - exceptions, virtual calls, lambdas and threads work across old and new code
 - gdb can set breakpoints in and step through patched code
+- shared libraries are patched like the executable, and changes that need a restart can be rebuilt and restarted automatically
 
 See [docs/DESIGN.md](docs/DESIGN.md) for how it works and §11 for the roadmap and current limits.
 
@@ -75,6 +76,16 @@ HOTPP_POST_PATCH(reload_assets);   // runs after every patch is live (HOTPP_PRE_
 - **Programs without a main loop:** set `Config::async = true` (or `HOTPP_ASYNC=1`), and patches apply on the agent thread as soon as they arrive.
 - **gdb** sees patched code automatically: breakpoints by function or `file:line`, stepping and backtraces work. When debugging a multithreaded program while patching, run `handle SIG38 nostop noprint pass` in gdb; HotPP pauses threads with that real-time signal.
 - **Layout changes:** if a struct's layout changes (a header gains a member), the host warns. Objects created before the patch keep the old layout.
+
+### Hot restart
+
+Changes HotPP can't patch (a resized global, a new `thread_local`) can be rebuilt and restarted automatically:
+
+```bash
+hotpp --build "cmake --build build" --auto-restart -- ./game
+```
+
+The host runs the build command, and the program re-executes itself with the same arguments, keeping its pid. `kill -USR1 <host pid>` does the same on demand. Save state in a `HOTPP_PRE_RESTART(fn)` hook, and restore it when `hotpp::restarted()` is true.
 
 | Variable | Effect |
 |---|---|

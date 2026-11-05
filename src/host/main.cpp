@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -22,13 +23,21 @@ namespace {
 using namespace hotpp;
 
 constexpr const char* kUsage =
-    "usage: hotpp [--endpoint <name>] [--once] [-v]\n"
-    "       hotpp [--endpoint <name>] [-v] -- <program> [args...]\n"
+    "usage: hotpp [options] [--once]\n"
+    "       hotpp [options] -- <program> [args...]\n"
     "\n"
     "Without a program, waits for agents to connect (--once: exit after the first\n"
     "one disconnects). With a program, starts it connected to this host and exits\n"
     "with its exit code; exits 2 if no agent connected, 3 if an agent reported an\n"
-    "unusable memory layout. -v prints every binding decision of every patch.\n";
+    "unusable memory layout.\n"
+    "\n"
+    "options:\n"
+    "  --endpoint <path>   socket to listen on\n"
+    "  --build <command>   rebuild command for hot restarts (run with /bin/sh -c)\n"
+    "  --auto-restart      rebuild and restart when a change can't be patched\n"
+    "  -v, --verbose       full connect info and every binding decision\n"
+    "\n"
+    "kill -USR1 <host pid> rebuilds and restarts every connected program.\n";
 
 struct Options {
     std::string endpoint;
@@ -50,6 +59,10 @@ bool parse_args(int argc, char** argv, Options& o) {
             o.once = true;
         } else if (std::strcmp(a, "-v") == 0 || std::strcmp(a, "--verbose") == 0) {
             o.host.verbose = true;
+        } else if (std::strcmp(a, "--build") == 0 && i + 1 < argc) {
+            o.host.build_command = argv[++i];
+        } else if (std::strcmp(a, "--auto-restart") == 0) {
+            o.host.auto_restart = true;
         } else {
             return false;
         }
@@ -108,6 +121,7 @@ int main(int argc, char** argv) {
     }
     auto* server = new Server;
     server->options = opt.host;
+    std::signal(SIGUSR1, [](int) { host::g_restart_requests.fetch_add(1); });
     std::printf("[hotpp] host %s listening on %s\n", HOTPP_VERSION, endpoint.c_str());
     std::fflush(stdout);
 

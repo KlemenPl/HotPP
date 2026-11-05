@@ -28,8 +28,13 @@ struct LinkResult;
 namespace hotpp::host {
 
 struct HostOptions {
-    bool verbose = false; // print every binding decision of every patch
+    bool verbose = false;      // print every binding decision of every patch
+    std::string build_command; // rebuilds the program for a hot restart (run with /bin/sh -c)
+    bool auto_restart = false; // hot-restart when a change can't be patched
 };
+
+// Bumped (e.g. by SIGUSR1) to ask every connected program to hot-restart.
+extern std::atomic<int> g_restart_requests;
 
 class Session {
 public:
@@ -71,6 +76,7 @@ private:
     bool changed(const std::filesystem::path& file); // content differs from the last time we looked
     void handle_changes(const std::vector<std::filesystem::path>& files);
     void warn_layout_changes(ModuleState& module, const link::LinkResult& linked);
+    void hot_restart(const std::string& reason);
     std::vector<uint64_t> resolve_external(const std::vector<std::string>& names);
     std::optional<proto::PatchResult> wait_for_result(uint32_t id);
     void say(const std::string& line) const;

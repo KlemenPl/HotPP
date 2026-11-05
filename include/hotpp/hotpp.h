@@ -33,6 +33,7 @@ inline bool init(const Config& = Config{}) { return false; }
 inline void sync_point() {}
 inline void shutdown() {}
 inline bool connected() { return false; }
+inline bool restarted() { return false; }
 #else
 // Connects to the host. Returns false (and the app keeps running normally) if hot
 // reload is disabled ($HOTPP_DISABLE=1) or unavailable. Call once per process.
@@ -44,10 +45,13 @@ void sync_point();
 void shutdown();
 // True while connected to a host.
 bool connected();
+// True if this process was started by a hot restart (the host rebuilt the program
+// and re-executed it). Restore what HOTPP_PRE_RESTART hooks saved.
+bool restarted();
 #endif
 
 namespace detail {
-enum class HookKind { PrePatch, PostPatch };
+enum class HookKind { PrePatch, PostPatch, PreRestart };
 #if !defined(HOTPP_DISABLE)
 void register_hook(HookKind kind, void (*fn)());
 #endif
@@ -83,3 +87,9 @@ struct HookRegistrar {
 #define HOTPP_POST_PATCH(fn)                                                        \
     [[gnu::used]] static ::hotpp::detail::HookRegistrar HOTPP_CONCAT(hotpp_hook_, __COUNTER__)( \
         ::hotpp::detail::HookKind::PostPatch, fn)
+
+// Registers `void fn()` to run right before a hot restart replaces the process:
+// save whatever state the restarted program should pick up (see restarted()).
+#define HOTPP_PRE_RESTART(fn)                                                       \
+    [[gnu::used]] static ::hotpp::detail::HookRegistrar HOTPP_CONCAT(hotpp_hook_, __COUNTER__)( \
+        ::hotpp::detail::HookKind::PreRestart, fn)

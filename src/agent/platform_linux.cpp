@@ -245,6 +245,32 @@ void ipc_close(Connection* c) {
 
 // --- processes and threads ---------------------------------------------------------
 
+std::vector<std::string> command_line() {
+    std::vector<std::string> out;
+    FILE* f = std::fopen("/proc/self/cmdline", "re");
+    if (!f) return out;
+    std::string cur;
+    for (int c; (c = std::fgetc(f)) != EOF;) {
+        if (c == 0) {
+            out.push_back(std::move(cur));
+            cur.clear();
+        } else {
+            cur += char(c);
+        }
+    }
+    std::fclose(f);
+    return out;
+}
+
+std::string exec_self(const std::string& path, const std::vector<std::string>& args) {
+    std::vector<char*> argv;
+    for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+    // Descriptors the app didn't mark close-on-exec stay open, as with any exec.
+    execv(path.c_str(), argv.data());
+    return std::string("exec ") + path + ": " + std::strerror(errno);
+}
+
 bool spawn_detached(const std::string& program, const std::vector<std::string>& args) {
     std::vector<char*> argv;
     argv.push_back(const_cast<char*>(program.c_str()));

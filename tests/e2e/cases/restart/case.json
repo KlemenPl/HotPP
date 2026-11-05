@@ -1,0 +1,23 @@
+{
+  "host_args": [
+    "--build",
+    "cmake --build {build_dir} --target {target}",
+    "--auto-restart"
+  ],
+  "rebuild_after": true,
+  "steps": [
+    {
+      "name": "resize a global",
+      "copy": {
+        "game.cpp": "v2/game.cpp"
+      },
+      "expect": [
+        "restart required: size of counter",
+        "^\\[hotpp\\] rebuilt in",
+        "^\\[hotpp\\] restarting",
+        "^\\[hotpp\\] agent connected",
+        "^restarted, saved counter [1-9]"
+      ]
+    }
+  ]
+}

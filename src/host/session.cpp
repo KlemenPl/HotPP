@@ -17,6 +17,8 @@
 
 namespace hotpp::host {
 
+std::atomic<int> g_restart_requests{0};
+
 namespace fs = std::filesystem;
 using namespace hotpp::proto;
 using Clock = std::chrono::steady_clock;
@@ -469,7 +471,13 @@ void Session::watch_headers() {
 void Session::watch_loop() {
     using namespace std::chrono_literals;
     bool headers_watched = false;
+    int restarts_seen = g_restart_requests.load();
     while (!stop_) {
+        if (g_restart_requests.load() != restarts_seen) {
+            restarts_seen = g_restart_requests.load();
+            hot_restart("requested");
+            continue;
+        }
         if (!headers_watched && scan_done_) {
             watch_headers();
             headers_watched = true;
@@ -613,6 +621,9 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
         }
     } catch (const link::RestartRequired& e) {
         say("patch " + std::to_string(id) + " not applied, restart required: " + e.what());
+        if (options_.auto_restart) hot_restart(e.what());
+        else if (!options_.build_command.empty())
+            say("run with --auto-restart, or send the host SIGUSR1, to rebuild and restart the program");
         return;
     } catch (const std::exception& e) {
         say("patch " + std::to_string(id) + " not applied: " + e.what());
@@ -664,6 +675,25 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
     if (links.size() > 1) summary += ", " + std::to_string(links.size()) + " modules";
     say("patch " + std::to_string(id) + " applied in " + ms_since(started) + ": " + names + " (" + summary + ", " +
         format_size(bytes) + ")");
+}
+
+// Rebuild (if a build command is set), then have the agent re-exec the program. The
+// process keeps its pid and reconnects as a new session; this one ends.
+void Session::hot_restart(const std::string& reason) {
+    if (!options_.build_command.empty()) {
+        say("rebuilding (" + reason + "): " + options_.build_command);
+        const auto started = Clock::now();
+        std::string output, error;
+        const int rc = run_capture({"/bin/sh", "-c", options_.build_command}, {}, output, error);
+        if (rc != 0) {
+            std::fputs(output.c_str(), stdout);
+            say("restart cancelled: " + (rc < 0 ? error : "the build failed (exit code " + std::to_string(rc) + ")"));
+            return;
+        }
+        say("rebuilt in " + ms_since(started));
+    }
+    Writer w;
+    if (send(MsgType::Restart, w)) say("restarting " + exe_name_);
 }
 
 std::vector<uint64_t> Session::resolve_external(const std::vector<std::string>& names) {

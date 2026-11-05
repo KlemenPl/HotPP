@@ -55,6 +55,11 @@ bool ipc_recv(Connection* c, void* data, size_t size);
 void ipc_shutdown(Connection* c); // unblocks a pending ipc_recv on another thread
 void ipc_close(Connection* c);
 
+// The command line the process was started with (/proc/self/cmdline).
+std::vector<std::string> command_line();
+// Replaces the process image; returns only on failure (with errno-style text).
+std::string exec_self(const std::string& path, const std::vector<std::string>& argv);
+
 // Starts `program` (searched on PATH) without waiting for it.
 bool spawn_detached(const std::string& program, const std::vector<std::string>& args);
 

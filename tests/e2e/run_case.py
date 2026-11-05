@@ -95,6 +95,8 @@ def main() -> int:
     ap.add_argument("--exe", required=True)
     ap.add_argument("--case", required=True, help="case source directory")
     ap.add_argument("--work", required=True, help="build-tree copies the program was built from")
+    ap.add_argument("--build-dir", help="CMake build tree, for {build_dir} in host_args")
+    ap.add_argument("--target", help="the program's CMake target, for {target} in host_args")
     ap.add_argument("--step-timeout", type=float, default=40)
     args = ap.parse_args()
 
@@ -118,20 +120,23 @@ def main() -> int:
     stop_file = os.path.join(args.work, "stop")
     if os.path.exists(stop_file):
         os.remove(stop_file)
-    env = dict(os.environ, HOTPP_E2E_STOP=stop_file, **spec.get("env", {}))
+    state_file = os.path.join(args.work, "state")
+    env = dict(os.environ, HOTPP_E2E_STOP=stop_file, HOTPP_E2E_STATE=state_file, **spec.get("env", {}))
+    expand = lambda a: a.format(build_dir=args.build_dir, target=args.target)
+    host_args = [expand(a) for a in spec.get("host_args", [])]
     popen = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
     procs = []
     if "gdb" in spec:
         runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
         endpoint = os.path.join(runtime, f"hotpp-e2e-{os.getpid()}.sock")
-        procs.append(subprocess.Popen([args.host, "--endpoint", endpoint, "--once"], env=env, **popen))
+        procs.append(subprocess.Popen([args.host, *host_args, "--endpoint", endpoint, "--once"], env=env, **popen))
         time.sleep(0.3)  # let the host start listening
         env.update(HOTPP_ENDPOINT=endpoint, HOTPP_LAUNCH_HOST="0")
         script = os.path.join(args.case, spec["gdb"])
         procs.append(subprocess.Popen(["gdb", "-q", "-batch", "-nx", "-iex", "set debuginfod enabled off",
                                        "-x", script, "--args", args.exe], env=env, **popen))
     else:
-        procs.append(subprocess.Popen([args.host, "--", args.exe], env=env, **popen))
+        procs.append(subprocess.Popen([args.host, *host_args, "--", args.exe], env=env, **popen))
     out = Output(procs)
     error = None
     try:
@@ -166,9 +171,17 @@ def main() -> int:
         for path, (content, st) in originals.items():
             with open(path, "wb") as f:
                 f.write(content)
-            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
-        if os.path.exists(stop_file):
-            os.remove(stop_file)
+            if not spec.get("rebuild_after"):
+                os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        if spec.get("rebuild_after"):
+            # The case rebuilt the program from a later version; build it from v1 again.
+            build = subprocess.run(expand("cmake --build {build_dir} --target {target}"), shell=True,
+                                   capture_output=True, text=True)
+            if build.returncode != 0 and not error:
+                error = "rebuilding the program from v1 failed:\n" + build.stdout + build.stderr
+        for f in (stop_file, state_file):
+            if os.path.exists(f):
+                os.remove(f)
 
     if error:
         print(f"error: {error}")

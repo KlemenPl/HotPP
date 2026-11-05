@@ -1,6 +1,6 @@
 # HotPP — Design
 
-Status: M0, M1, M3, M4 and M5.1 implemented; M2 (Windows) dropped · Last updated: 2026-11-05
+Status: M0, M1, M3, M4, M5.1 and M5.2 implemented; M2 (Windows) dropped · Last updated: 2026-11-05
 
 HotPP is a hot-reload tool for C++ on Linux (x86-64, GCC and Clang). You edit a `.cpp` file or a header, save it, and the running program picks up the new code, typically within a fraction of a second. It doesn't restart and doesn't lose state.
 
@@ -99,6 +99,7 @@ The host listens and agents connect. One host serves any number of agents.
 | `ReserveRequest` / `ReserveReply` | host ↔ agent | a patch region next to a given module |
 | `Patch` | host → agent | segments, patch sites, `.eh_frame` blocks, initializers, debug objects |
 | `PatchResult` | agent → host | id, ok, error |
+| `Restart` | host → agent | re-exec the (rebuilt) executable (§8.8) |
 | `Log`, `Bye` | both | text for the user; orderly disconnect |
 
 ---
@@ -325,9 +326,19 @@ HOTPP_POST_PATCH(on_after_patch);   // after it is live
   - A hook whose body changes is redirected like any function, since the registry stores its canonical address.
 - Typical uses: rebuilding caches, re-reading data files, deduplicating registrations.
 
----
+### 8.8 Hot restart
+Some changes can't be patched: a resized global, a new `thread_local`, a changed struct layout that live objects use. For those the host can **rebuild and restart** the program instead.
 
-## 9. Debugger support
+1. **Trigger:** with `--auto-restart`, a patch rejected as "restart required" triggers it; `kill -USR1 <host pid>` triggers it for every connected program.
+2. **Rebuild:** the host runs the `--build "<command>"` (via `/bin/sh -c`, in the host's working directory, e.g. `cmake --build build`). If the build fails, the restart is cancelled and the program keeps running.
+3. **Restart:** the host sends `Restart`. Like a patch, it is handled in `sync_point()`, or on the agent thread in async mode. The agent:
+   - runs the `HOTPP_PRE_RESTART` hooks (save state to a file, say)
+   - sets `HOTPP_RESTARTED` to the restart count and flushes stdio
+   - shuts down the connection
+   - `execv`s the executable path recorded at startup, which is now the rebuilt file, not `/proc/self/exe`, with the original arguments (`/proc/self/cmdline`) and environment
+4. **Reconnect:** the process keeps its pid, so `hotpp --` run mode carries on, and the new image's agent connects as a new session. `hotpp::restarted()` is true in it.
+
+State isn't carried over automatically. Hooks and `restarted()` let the program save and restore what matters.
 
 Patched code is registered with gdb's JIT interface. The agent defines `__jit_debug_descriptor` and `__jit_debug_register_code` (weak, so they merge with another JIT's definitions in the same process).
 
@@ -416,7 +427,7 @@ Defining `HOTPP_DISABLE` turns the whole API into inline no-ops.
 | **M3** | Correctness: header edits, several TUs per patch, repeated patches, initializers, local statics, existing TLS, exceptions and RTTI across patches, thread pausing, restart-required checks | The e2e suite (§12) passes with GCC and Clang at `-O0` and `-O2`. | done |
 | **M4** | Usability: gdb JIT debug info, hooks, async mode, layout-change warnings, quieter console output | You can step through patched code in gdb (automated test). | done |
 | **M5.1** | Shared libraries: every module built from the project's sources is patched, with its own index and region | A `.so`'s globals (including copy-relocated ones), statics and `thread_local`s survive a patch; it can call back into the program (`shared_lib` case). | done |
-| **M5.2** | Hot restart: for changes that need a restart, rebuild with the user's build command and re-exec with the same command line | The program restarts on the new build from the host, without the user restarting it. | |
+| **M5.2** | Hot restart: for changes that need a restart, rebuild with the user's build command and re-exec with the same command line | The program restarts on the new build from the host, without the user restarting it (`restart` case). | done |
 | **M5.3** | Attach: inject the agent into a running program built with the flags but without the agent (ptrace + `dlopen`) | A running program not linked with the agent gets patched. | |
 
 Each milestone ends with a git commit, pushed to the Gitea remote, once its "done when" condition is met.
@@ -475,6 +486,7 @@ The program checks its invariants every frame (state never resets, old and new r
 | `async` | In async mode, a patch applies while the main thread spins in a loop that never reaches `sync_point()`. |
 | `layout_warning` | A struct that grows in a header triggers the layout warning, and the patch still applies. |
 | `shared_lib` | Code in a shared library (`lib_*.cpp` in the case) is patched: its global (copy-relocated into the executable), `static` and `thread_local` keep their values, and it calls back into the executable. |
+| `restart` | A resized global is rebuilt and restarted with `--build … --auto-restart`; the pre-restart hook saves state, the restarted process (same pid) sees `restarted()`, reads it back and runs the new code. The harness rebuilds the program from v1 afterwards. |
 | `gdb_step` | Under gdb: a breakpoint in new code, locals and kept globals, a backtrace into old code, `finish` (§9). Runs only if gdb is installed. |
 
 **Matrix:** {GCC, Clang} × {Debug (`-O0`), Release (`-O2`)}, in four build directories. With gdb mode, `case.json` can also run the program under gdb (`"gdb": "<script>"`, `"expect_output": [...]`). `"env"` sets environment variables, and a step's `"expect"` may list several lines in order.

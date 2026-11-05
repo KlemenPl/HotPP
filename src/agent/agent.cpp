@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -46,6 +47,9 @@ struct AgentState {
     bool initialized = false;
 
     bool async = false; // apply patches on the agent thread as they arrive
+    std::string exe;               // executable path at startup: a rebuild replaces this file
+    std::vector<std::string> argv; // command line, for hot restart
+    std::atomic<bool> restart_pending{false};
 
     std::mutex queue_mutex;
     std::vector<Patch> pending; // received, waiting for sync_point()
@@ -60,8 +64,16 @@ AgentState& state() {
 // Hooks register during static initialization, possibly before init().
 struct HookRegistry {
     std::mutex mutex;
-    std::vector<void (*)()> pre, post;
+    std::vector<void (*)()> pre, post, restart;
 };
+
+std::vector<void (*)()>& hook_list(HookRegistry& h, detail::HookKind kind) {
+    switch (kind) {
+    case detail::HookKind::PrePatch: return h.pre;
+    case detail::HookKind::PostPatch: return h.post;
+    default: return h.restart;
+    }
+}
 
 HookRegistry& hooks() {
     static HookRegistry h;
@@ -73,13 +85,13 @@ void run_hooks(detail::HookKind kind) {
     {
         HookRegistry& h = hooks();
         std::lock_guard<std::mutex> lock(h.mutex);
-        fns = kind == detail::HookKind::PrePatch ? h.pre : h.post;
+        fns = hook_list(h, kind);
     }
     for (void (*fn)() : fns) {
         try {
             fn();
         } catch (...) {
-            agent::log("a %s-patch hook threw; ignored", kind == detail::HookKind::PrePatch ? "pre" : "post");
+            agent::log("a hook threw; ignored");
         }
     }
 }
@@ -110,6 +122,20 @@ bool recv_message(AgentState& s, Header& h, std::vector<uint8_t>& payload) {
 }
 
 bool reserve_regions(uint64_t requested, const ModuleRecord& module, std::vector<RegionRecord>& out);
+
+// Hot restart: the host rebuilt the program. Re-exec the executable (the new file at
+// the same path) with the same arguments; the new process reconnects. Same pid.
+void restart_now() {
+    AgentState& s = state();
+    run_hooks(detail::HookKind::PreRestart);
+    agent::log("restarting %s", s.exe.c_str());
+    const char* count = std::getenv("HOTPP_RESTARTED");
+    setenv("HOTPP_RESTARTED", std::to_string((count ? std::atoi(count) : 0) + 1).c_str(), 1);
+    std::fflush(nullptr);
+    if (s.conn) agent::ipc_shutdown(s.conn); // the host sees the old session end
+    const std::string error = agent::exec_self(s.exe, s.argv);
+    agent::log("hot restart failed: %s; the program keeps running without hot reload", error.c_str());
+}
 
 void apply_and_report(const Patch& patch) {
     AgentState& s = state();
@@ -153,6 +179,13 @@ void reader_main(void*) {
             }
             std::lock_guard<std::mutex> lock(s.queue_mutex);
             s.pending.push_back(std::move(patch));
+            s.has_pending = true;
+        } else if (h.type == MsgType::Restart) {
+            if (s.async) {
+                restart_now();
+                break; // only reached if exec failed; the connection is closed
+            }
+            s.restart_pending = true;
             s.has_pending = true;
         } else if (h.type == MsgType::ReserveRequest) {
             ReserveRequest req;
@@ -247,6 +280,8 @@ bool init(const Config& cfg) {
     hello.arch = Arch::X64;
 #endif
     hello.exe = agent::executable_path();
+    s.exe = hello.exe;
+    s.argv = agent::command_line();
     hello.compile_commands = pick(nullptr, "HOTPP_COMPILE_COMMANDS",
                                   cfg.compile_commands ? cfg.compile_commands : "");
     hello.modules = agent::enumerate_modules();
@@ -317,6 +352,7 @@ void sync_point() {
         s.has_pending = false;
     }
     for (const Patch& patch : todo) apply_and_report(patch);
+    if (s.restart_pending.exchange(false)) restart_now();
 }
 
 namespace detail {
@@ -324,7 +360,7 @@ void register_hook(HookKind kind, void (*fn)()) {
     if (!fn) return;
     HookRegistry& h = hooks();
     std::lock_guard<std::mutex> lock(h.mutex);
-    auto& list = kind == HookKind::PrePatch ? h.pre : h.post;
+    auto& list = hook_list(h, kind);
     // A patch can re-run a file's initializers (docs/DESIGN.md §8.6); register once.
     if (std::find(list.begin(), list.end(), fn) == list.end()) list.push_back(fn);
 }
@@ -346,5 +382,10 @@ void shutdown() {
 }
 
 bool connected() { return state().connected; }
+
+bool restarted() {
+    const char* count = std::getenv("HOTPP_RESTARTED");
+    return count && std::atoi(count) > 0;
+}
 
 } // namespace hotpp

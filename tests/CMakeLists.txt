@@ -70,14 +70,15 @@ if(TARGET hotpp AND Python3_Interpreter_FOUND)
         add_test(NAME e2e_${name}
             COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_case.py
                 --host $<TARGET_FILE:hotpp> --exe $<TARGET_FILE:hotpp_e2e_${name}>
-                --case ${src} --work ${work})
+                --case ${src} --work ${work}
+                --build-dir ${CMAKE_BINARY_DIR} --target hotpp_e2e_${name})
         set_tests_properties(e2e_${name} PROPERTIES TIMEOUT 180)
     endfunction()
 
     foreach(case
             state new_global header_inline virtual_change lambda_template exceptions
             thread_spin repeat tls restart_required compile_error hooks async layout_warning
-            shared_lib)
+            shared_lib restart)
         hotpp_e2e_case(${case})
     endforeach()
 
