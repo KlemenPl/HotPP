@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -16,6 +17,8 @@ public:
     virtual ~Stream() = default;
     virtual bool send(const void* data, size_t size) = 0;
     virtual bool recv(void* data, size_t size) = 0;
+    // Ends the connection from another thread: a blocked recv() returns false.
+    virtual void shutdown() = 0;
 };
 
 class Listener {
@@ -29,9 +32,13 @@ public:
 
 std::unique_ptr<Listener> listen(const std::string& endpoint, std::string& error);
 
-// Runs argv[0] (searched on PATH) with the host's stdio, waits for it and returns
-// its exit code (128 + signal number if killed by a signal), or -1 if it couldn't start.
-int run_child(const std::vector<std::string>& argv, std::string& error);
+// Starts argv[0] (searched on PATH) with the host's stdio. Returns its pid, or -1
+// (with `error` set) if it couldn't start.
+int spawn_child(const std::vector<std::string>& argv, std::string& error);
+// Waits for a child started by spawn_child() and returns its exit code (128 +
+// signal number if killed by a signal). `on_signal` runs whenever a signal
+// interrupts the wait, e.g. to forward it.
+int wait_child(int pid, const std::function<void()>& on_signal);
 
 // Runs argv[0] in `cwd` with stdout and stderr captured into `output`, waits for it
 // and returns its exit code, or -1 (with `error` set) if it couldn't start.

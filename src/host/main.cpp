@@ -7,6 +7,7 @@
 #include "host/platform.h"
 #include "host/session.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
@@ -14,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -70,6 +72,26 @@ bool parse_args(int argc, char** argv, Options& o) {
     return true;
 }
 
+// Set by SIGINT/SIGTERM: shut down cleanly (remove the socket, end sessions).
+std::atomic<int> g_stop_signal{0};
+std::atomic<int> g_interrupts{0};
+
+void on_stop_signal(int sig) {
+    g_stop_signal = sig;
+    if (sig == SIGINT) g_interrupts.fetch_add(1);
+}
+
+void install_signal_handlers() {
+    struct sigaction sa{};
+    sigemptyset(&sa.sa_mask);
+    sa.sa_handler = on_stop_signal; // no SA_RESTART: interrupt waitpid() so signals can be forwarded
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+    sa.sa_handler = [](int) { host::g_restart_requests.fetch_add(1); };
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGUSR1, &sa, nullptr);
+}
+
 struct Server {
     std::mutex mutex;
     std::condition_variable cv;
@@ -77,13 +99,18 @@ struct Server {
     int sessions_ended = 0; // agents that sent a hello and then disconnected
     int problems = 0;       // agents with an unusable layout
     host::HostOptions options;
+    std::vector<std::thread> sessions; // joined at shutdown
+    std::set<host::Stream*> open;      // live connections, ended at shutdown
 };
 
 void handle_client(std::unique_ptr<host::Stream> stream, Server* server) {
+    host::Stream* raw = stream.get();
     host::Session::Outcome outcome;
     {
         host::Session session(std::move(stream), server->options);
         outcome = session.run();
+        std::lock_guard<std::mutex> lock(server->mutex);
+        server->open.erase(raw); // before the session (and its stream) goes away
     }
     {
         std::lock_guard<std::mutex> lock(server->mutex);
@@ -92,6 +119,17 @@ void handle_client(std::unique_ptr<host::Stream> stream, Server* server) {
         server->problems += outcome.hello && !outcome.layout_ok;
     }
     server->cv.notify_all();
+}
+
+// Stops accepting, ends every open connection and waits for all session threads.
+void shut_down(host::Listener& listener, std::thread& acceptor, Server& server) {
+    listener.close();
+    if (acceptor.joinable()) acceptor.join();
+    {
+        std::lock_guard<std::mutex> lock(server.mutex);
+        for (host::Stream* s : server.open) s->shutdown();
+    }
+    for (std::thread& t : server.sessions) t.join();
 }
 
 } // namespace
@@ -113,54 +151,60 @@ int main(int argc, char** argv) {
                                                    : default_endpoint();
 
     std::string error;
-    // Both outlive main's scope: detached threads use them until the process exits.
-    host::Listener* listener = host::listen(endpoint, error).release();
+    std::unique_ptr<host::Listener> listener = host::listen(endpoint, error);
     if (!listener) {
         std::fprintf(stderr, "[hotpp] error: %s\n", error.c_str());
         return 1;
     }
-    auto* server = new Server;
-    server->options = opt.host;
-    std::signal(SIGUSR1, [](int) { host::g_restart_requests.fetch_add(1); });
+    Server server;
+    server.options = opt.host;
+    install_signal_handlers();
     std::printf("[hotpp] host %s listening on %s\n", HOTPP_VERSION, endpoint.c_str());
     std::fflush(stdout);
 
-    std::thread([listener, server] {
+    std::thread acceptor([&] {
         while (std::unique_ptr<host::Stream> s = listener->accept()) {
-            {
-                std::lock_guard<std::mutex> lock(server->mutex);
-                ++server->active;
-            }
-            std::thread(handle_client, std::move(s), server).detach();
+            std::lock_guard<std::mutex> lock(server.mutex);
+            ++server.active;
+            server.open.insert(s.get());
+            server.sessions.emplace_back(handle_client, std::move(s), &server);
         }
-    }).detach();
+    });
 
     if (run_mode) {
         host::set_env("HOTPP_ENDPOINT", endpoint);
-        int code = host::run_child(opt.program, error);
-        if (code < 0) {
+        const int pid = host::spawn_child(opt.program, error);
+        if (pid < 0) {
             std::fprintf(stderr, "[hotpp] error: %s\n", error.c_str());
-            listener->close();
+            shut_down(*listener, acceptor, server);
             return 1;
         }
-        std::unique_lock<std::mutex> lock(server->mutex);
-        server->cv.wait_for(lock, std::chrono::seconds(2), [&] { return server->active == 0; });
-        const int hellos = server->sessions_ended, problems = server->problems;
-        lock.unlock();
-        listener->close();
+        // Ctrl+C reaches the child too (same process group); SIGTERM sent to the host
+        // alone, or a second Ctrl+C, is passed on.
+        const int code = host::wait_child(pid, [pid] {
+            if (g_stop_signal == SIGTERM) kill(pid, SIGTERM);
+            if (g_interrupts >= 2) kill(pid, SIGKILL);
+        });
+        {
+            std::unique_lock<std::mutex> lock(server.mutex);
+            server.cv.wait_for(lock, std::chrono::seconds(2), [&] { return server.active == 0; });
+        }
+        shut_down(*listener, acceptor, server);
         std::printf("[hotpp] %s exited with code %d\n", opt.program[0].c_str(), code);
         if (code != 0) return code;
-        if (hellos == 0) {
+        if (server.sessions_ended == 0) {
             std::fprintf(stderr, "[hotpp] error: no agent connected\n");
             return 2;
         }
-        return problems ? 3 : 0;
+        return server.problems ? 3 : 0;
     }
 
-    std::unique_lock<std::mutex> lock(server->mutex);
-    server->cv.wait(lock, [&] { return opt.once && server->sessions_ended > 0; });
-    const int problems = server->problems;
-    lock.unlock();
-    listener->close();
-    return problems ? 3 : 0;
+    {
+        std::unique_lock<std::mutex> lock(server.mutex);
+        while (!g_stop_signal && !(opt.once && server.sessions_ended > 0))
+            server.cv.wait_for(lock, std::chrono::milliseconds(200));
+    }
+    if (g_stop_signal) std::printf("[hotpp] shutting down\n");
+    shut_down(*listener, acceptor, server);
+    return server.problems ? 3 : 0;
 }

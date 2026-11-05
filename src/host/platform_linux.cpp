@@ -24,6 +24,8 @@ public:
     explicit UnixStream(int fd) : fd_(fd) {}
     ~UnixStream() override { ::close(fd_); }
 
+    void shutdown() override { ::shutdown(fd_, SHUT_RDWR); }
+
     bool send(const void* data, size_t size) override {
         const char* p = static_cast<const char*>(data);
         while (size > 0) {
@@ -129,7 +131,7 @@ std::unique_ptr<Listener> listen(const std::string& endpoint, std::string& error
     return std::make_unique<UnixListener>(fd, endpoint);
 }
 
-int run_child(const std::vector<std::string>& args, std::string& error) {
+int spawn_child(const std::vector<std::string>& args, std::string& error) {
     std::vector<char*> argv;
     for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
     argv.push_back(nullptr);
@@ -139,12 +141,14 @@ int run_child(const std::vector<std::string>& args, std::string& error) {
         error = errno_text(("cannot start " + args[0]).c_str(), rc);
         return -1;
     }
+    return int(pid);
+}
+
+int wait_child(int pid, const std::function<void()>& on_signal) {
     int status = 0;
     while (::waitpid(pid, &status, 0) < 0) {
-        if (errno != EINTR) {
-            error = errno_text("waitpid", errno);
-            return -1;
-        }
+        if (errno != EINTR) return -1;
+        if (on_signal) on_signal();
     }
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);

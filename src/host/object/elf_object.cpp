@@ -26,6 +26,8 @@ std::unique_ptr<ElfObject> ElfObject::from_file(ElfFile file) {
         out.flags = s.flags;
         out.size = s.size;
         out.align = s.addralign ? s.addralign : 1;
+        if ((out.align & (out.align - 1)) || out.align > (uint64_t(1) << 30))
+            throw ElfError(f.name() + ": section " + out.name + " has a bad alignment");
         if (s.type != SHT_NOBITS && s.type != SHT_NULL) out.data = f.section_data(i);
         if (s.type == SHT_SYMTAB) symtab = int(i);
         if ((s.flags & SHF_COMPRESSED) && (s.flags & SHF_ALLOC))
@@ -47,8 +49,11 @@ std::unique_ptr<ElfObject> ElfObject::from_file(ElfFile file) {
         s.visibility = syms[i].visibility();
         s.shndx = shndx[i];
         if (s.type == STT_FILE && obj->source_name.empty()) obj->source_name = s.name;
-        if (s.defined() && s.shndx < SHN_LORESERVE && s.shndx >= shdrs.size())
-            throw ElfError(f.name() + ": symbol " + s.name + " has a bad section index");
+        if (s.defined() && s.shndx < SHN_LORESERVE) {
+            if (s.shndx >= shdrs.size()) throw ElfError(f.name() + ": symbol " + s.name + " has a bad section index");
+            if (s.value > shdrs[s.shndx].size && shdrs[s.shndx].type != SHT_NULL)
+                throw ElfError(f.name() + ": symbol " + s.name + " lies outside its section");
+        }
     }
 
     for (size_t i = 0; i < shdrs.size(); ++i) {
@@ -61,6 +66,7 @@ std::unique_ptr<ElfObject> ElfObject::from_file(ElfFile file) {
             for (size_t k = 0; k < n; ++k) {
                 Rela r = f.read<Rela>(s.offset + k * sizeof(Rela));
                 if (r.sym() >= obj->symbols.size()) throw ElfError(f.name() + ": bad relocation symbol");
+                if (r.offset >= shdrs[s.info].size) throw ElfError(f.name() + ": relocation outside its section");
                 relocs.push_back(r);
             }
         } else if (s.type == SHT_REL) {

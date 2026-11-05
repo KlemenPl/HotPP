@@ -20,7 +20,8 @@ if(TARGET hotpp_host_lib)
     add_library(hotpp_test_link_sample OBJECT unit/data/link_sample.cpp)
     target_compile_options(hotpp_test_link_sample PRIVATE
         -O0 -fPIE -fpatchable-function-entry=7,5 -ffunction-sections -fdata-sections)
-    target_sources(hotpp_unit_tests PRIVATE unit/dwarf_types_test.cpp unit/elf_test.cpp unit/linker_test.cpp)
+    target_sources(hotpp_unit_tests PRIVATE unit/dwarf_types_test.cpp unit/elf_test.cpp unit/linker_test.cpp
+                                            unit/robustness_test.cpp)
     target_compile_definitions(hotpp_unit_tests PRIVATE
         "HOTPP_TEST_LINK_OBJECT=\"$<TARGET_OBJECTS:hotpp_test_link_sample>\""
         "HOTPP_TEST_SOURCE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}\"")

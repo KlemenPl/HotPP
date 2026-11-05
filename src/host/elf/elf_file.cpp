@@ -37,9 +37,10 @@ void ElfFile::parse() {
         // e_shnum == 0 means the real count lives in section 0's sh_size.
         uint64_t count = ehdr_.shnum;
         if (count == 0) count = read<Shdr>(ehdr_.shoff).size;
+        if (count > bytes_.size() / sizeof(Shdr)) throw ElfError(name_ + ": bad section header count");
         check(ehdr_.shoff, count * sizeof(Shdr));
         shdrs_.resize(count);
-        std::memcpy(shdrs_.data(), bytes_.data() + ehdr_.shoff, count * sizeof(Shdr));
+        if (count) std::memcpy(shdrs_.data(), bytes_.data() + ehdr_.shoff, count * sizeof(Shdr));
     }
     if (ehdr_.phoff && ehdr_.phnum) {
         if (ehdr_.phentsize != sizeof(Phdr)) throw ElfError(name_ + ": unexpected program header size");

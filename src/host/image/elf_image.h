@@ -23,6 +23,7 @@ struct ImageSymbol {
 class ElfImage {
 public:
     static std::unique_ptr<ElfImage> load(const std::filesystem::path& path);
+    static std::unique_ptr<ElfImage> from_file(elf::ElfFile file);
 
     const elf::ElfFile& file() const { return file_; }
     uint16_t type() const { return file_.header().type; }

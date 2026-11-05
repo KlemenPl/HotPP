@@ -5,17 +5,22 @@ namespace hotpp::image {
 using namespace hotpp::elf;
 
 std::unique_ptr<ElfImage> ElfImage::load(const std::filesystem::path& path) {
+    return from_file(ElfFile::load(path));
+}
+
+std::unique_ptr<ElfImage> ElfImage::from_file(ElfFile elf) {
     auto img = std::make_unique<ElfImage>();
-    img->file_ = ElfFile::load(path);
+    img->file_ = std::move(elf);
     const ElfFile& f = img->file_;
+    const std::string path = f.name();
     if (f.header().type != ET_EXEC && f.header().type != ET_DYN)
-        throw ElfError(path.string() + ": not an executable");
+        throw ElfError(path + ": not an executable");
 
     int symtab = -1;
     for (size_t i = 0; i < f.sections().size(); ++i)
         if (f.sections()[i].type == SHT_SYMTAB) symtab = int(i);
     if (symtab < 0)
-        throw ElfError(path.string() + " has no symbol table (stripped?); HotPP needs an unstripped binary");
+        throw ElfError(path + " has no symbol table (stripped?); HotPP needs an unstripped binary");
 
     std::vector<uint32_t> shndx;
     const std::vector<Sym> syms = f.symbols(size_t(symtab), shndx);

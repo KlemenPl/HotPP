@@ -823,7 +823,7 @@ private:
                 const ObjSection& sec = ob.sections[s.shndx];
                 FunctionVersion v;
                 v.entry = addr;
-                if (s.value >= kPadBytes && sec.data) {
+                if (s.value >= kPadBytes && s.value <= sec.size && sec.data) {
                     const uint64_t from = s.value - kPadBytes;
                     v.site = analyze_patch_site(sec.data + from, size_t(std::min<uint64_t>(kSiteProbeBytes, sec.size - from)));
                 }

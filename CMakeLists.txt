@@ -7,6 +7,7 @@ project(HotPP
 option(HOTPP_BUILD_HOST     "Build the hotpp host executable" ON)
 option(HOTPP_BUILD_EXAMPLES "Build the examples"              ${PROJECT_IS_TOP_LEVEL})
 option(HOTPP_BUILD_TESTS    "Build the tests"                 ${PROJECT_IS_TOP_LEVEL})
+option(HOTPP_SANITIZE       "Build the host and unit tests with ASan and UBSan" OFF)
 
 if(PROJECT_IS_TOP_LEVEL)
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -62,6 +63,14 @@ if(HOTPP_BUILD_HOST)
     target_compile_definitions(hotpp_host_lib PUBLIC HOTPP_VERSION="${PROJECT_VERSION}")
     target_compile_options(hotpp_host_lib PRIVATE ${HOTPP_WARNINGS})
     target_link_libraries(hotpp_host_lib PUBLIC Threads::Threads)
+
+    if(HOTPP_SANITIZE)
+        # The host parses arbitrary object files and debug info; sanitize it (and
+        # everything linking it). Programs under test stay unsanitized.
+        target_compile_options(hotpp_host_lib PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer
+                                                     -fno-sanitize-recover=undefined)
+        target_link_options(hotpp_host_lib PUBLIC -fsanitize=address,undefined)
+    endif()
 
     add_executable(hotpp src/host/main.cpp)
     target_compile_options(hotpp PRIVATE ${HOTPP_WARNINGS})
