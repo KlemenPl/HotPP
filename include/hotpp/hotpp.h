@@ -12,7 +12,8 @@
 namespace hotpp {
 
 struct Config {
-    // Path to compile_commands.json. Overridden by $HOTPP_COMPILE_COMMANDS.
+    // Path to compile_commands.json. Overridden by $HOTPP_COMPILE_COMMANDS. If neither
+    // is set, the agent looks in the executable's directory and its parents.
     const char* compile_commands = HOTPP_DEFAULT_COMPILE_COMMANDS;
     // Host endpoint (Unix socket path). Default: $HOTPP_ENDPOINT, then
     // $XDG_RUNTIME_DIR/hotpp.sock (or /tmp/hotpp-<uid>.sock).

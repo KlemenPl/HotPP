@@ -9,12 +9,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 namespace hotpp {
 
@@ -228,6 +231,24 @@ std::string pick(const char* configured, const char* env_name, const std::string
     return env.empty() ? fallback : env;
 }
 
+// Without a configured path (no hotpp_enable(), e.g. with the single header): the
+// executable's directory and its parents (a CMake build tree keeps the file at its
+// top), then the working directory.
+std::string find_compile_commands(const std::string& exe) {
+    auto readable = [](const std::string& p) { return access(p.c_str(), R_OK) == 0; };
+    std::string dir = exe.substr(0, exe.rfind('/'));
+    for (int depth = 0; depth < 8 && !dir.empty(); ++depth) {
+        const std::string candidate = dir + "/compile_commands.json";
+        if (readable(candidate)) return candidate;
+        const size_t slash = dir.rfind('/');
+        if (slash == std::string::npos || slash == 0) break;
+        dir.resize(slash);
+    }
+    char cwd[PATH_MAX];
+    if (readable("compile_commands.json") && getcwd(cwd, sizeof cwd)) return std::string(cwd) + "/compile_commands.json";
+    return {};
+}
+
 agent::Connection* connect_or_launch(const std::string& endpoint, const Config& cfg) {
     if (agent::Connection* c = agent::ipc_connect(endpoint)) return c;
     if (!cfg.launch_host || agent::get_env("HOTPP_LAUNCH_HOST") == "0") return nullptr;
@@ -284,6 +305,7 @@ bool init(const Config& cfg) {
     s.argv = agent::command_line();
     hello.compile_commands = pick(nullptr, "HOTPP_COMPILE_COMMANDS",
                                   cfg.compile_commands ? cfg.compile_commands : "");
+    if (hello.compile_commands.empty()) hello.compile_commands = find_compile_commands(hello.exe);
     hello.modules = agent::enumerate_modules();
     if (hello.modules.empty()) {
         agent::log("could not enumerate loaded modules; hot reload disabled");

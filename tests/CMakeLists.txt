@@ -41,7 +41,10 @@ endif()
 # swaps in newer versions of its sources; see e2e/run_case.py.
 find_package(Python3 COMPONENTS Interpreter)
 if(TARGET hotpp AND Python3_Interpreter_FOUND)
+    # SINGLE_HEADER: build the program with single_include/hotpp/hotpp.h instead of
+    # linking hotpp_agent (the case provides hotpp_impl.cpp).
     function(hotpp_e2e_case name)
+        cmake_parse_arguments(ARG "SINGLE_HEADER" "" "" ${ARGN})
         set(src ${CMAKE_CURRENT_SOURCE_DIR}/e2e/cases/${name})
         set(work ${CMAKE_CURRENT_BINARY_DIR}/e2e/${name})
         # The program is built from copies in the build tree, which the test edits.
@@ -57,10 +60,19 @@ if(TARGET hotpp AND Python3_Interpreter_FOUND)
                 list(APPEND sources ${work}/${f})
             endif()
         endforeach()
+        if(ARG_SINGLE_HEADER)
+            list(APPEND sources ${src}/hotpp_impl.cpp)
+        endif()
         add_executable(hotpp_e2e_${name} ${sources})
         target_include_directories(hotpp_e2e_${name} PRIVATE ${work} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/common)
         target_link_libraries(hotpp_e2e_${name} PRIVATE Threads::Threads)
-        hotpp_enable(hotpp_e2e_${name})
+        if(ARG_SINGLE_HEADER)
+            target_include_directories(hotpp_e2e_${name} PRIVATE ${PROJECT_SOURCE_DIR}/single_include)
+            target_link_libraries(hotpp_e2e_${name} PRIVATE ${CMAKE_DL_LIBS})
+            hotpp_enable(hotpp_e2e_${name} NO_AGENT)
+        else()
+            hotpp_enable(hotpp_e2e_${name})
+        endif()
         if(lib_sources)
             add_library(hotpp_e2e_${name}_lib SHARED ${lib_sources})
             target_include_directories(hotpp_e2e_${name}_lib PRIVATE ${work})
@@ -82,9 +94,19 @@ if(TARGET hotpp AND Python3_Interpreter_FOUND)
         hotpp_e2e_case(${case})
     endforeach()
 
+    # A program that uses only the single header (no hotpp_agent, no built-in
+    # compile_commands path: the agent finds it next to the executable).
+    hotpp_e2e_case(single_header SINGLE_HEADER)
+
     # Stepping through patched code needs gdb.
     find_program(HOTPP_GDB gdb)
     if(HOTPP_GDB)
         hotpp_e2e_case(gdb_step)
     endif()
+endif()
+
+# The single header must match the sources it's generated from.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME single_header_up_to_date
+        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/amalgamate.py --check)
 endif()

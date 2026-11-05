@@ -68,6 +68,15 @@ if(HOTPP_BUILD_HOST)
     target_link_libraries(hotpp PRIVATE hotpp_host_lib)
 endif()
 
+# Regenerates single_include/hotpp/hotpp.h from the agent sources.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_custom_target(hotpp_single_header
+        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/amalgamate.py
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMENT "Generating single_include/hotpp/hotpp.h")
+endif()
+
 if(HOTPP_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()

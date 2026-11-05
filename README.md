@@ -1,98 +1,138 @@
 # HotPP
 
-Hot reload for C++ on Linux (x86-64, GCC and Clang). Edit a source file and the running program picks up the new code without restarting, keeping its state. It works like Live++: changed translation units are recompiled with their original commands and linked against the running process, and the old functions are redirected to the new ones.
+Hot reload for C++ on Linux. Save a source file while your program runs, and the program picks up the new code in well under a second:
+- Changed functions are replaced.
+- Globals, statics and `thread_local`s keep their values.
+- New globals are initialized.
 
-**Status:** M5.2. Saving a `.cpp` file or a header of a running program patches it live:
-- changed functions are replaced, while globals, statics and `thread_local`s keep their values
-- new globals get initialized
-- exceptions, virtual calls, lambdas and threads work across old and new code
-- gdb can set breakpoints in and step through patched code
-- shared libraries are patched like the executable, and changes that need a restart can be rebuilt and restarted automatically
+HotPP works like Live++: it recompiles the changed files with your build's own commands, links them against the running process and redirects the old functions to the new ones.
 
-See [docs/DESIGN.md](docs/DESIGN.md) for how it works and §11 for the roadmap and current limits.
+Requires Linux on x86-64 and GCC ≥ 11 or Clang ≥ 14. Building HotPP also needs CMake ≥ 3.25, and the tests need Python 3. How it works: [docs/DESIGN.md](docs/DESIGN.md).
 
-## Build
+## Build HotPP
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-ctest --test-dir build --output-on-failure
 ```
 
-Requires Linux on x86-64, CMake ≥ 3.25, GCC ≥ 11 or Clang ≥ 14, and Python 3 for the end-to-end tests.
+This builds the host, `build/hotpp`. Put it on your `PATH`, or pass its path in `HOTPP_HOST`.
 
-## Use
+## Add it to your program
 
-In your CMake project:
+**With CMake:**
 
 ```cmake
 add_subdirectory(HotPP)
-add_executable(game main.cpp)
-hotpp_enable(game)   # links the agent and sets the required compiler/linker flags
-
+add_executable(game main.cpp game.cpp)
+hotpp_enable(game)     # links the agent, sets the flags, exports compile_commands.json
 add_library(engine SHARED engine.cpp)
-hotpp_enable(engine) # libraries get the flags; the program's agent patches them
+hotpp_enable(engine)   # shared libraries are patched too
 ```
 
-In your program:
+**With the single header:** copy [`single_include/hotpp/hotpp.h`](single_include/hotpp/hotpp.h) into your project. In one `.cpp` file, ideally one you rarely edit:
+
+```cpp
+#define HOTPP_IMPLEMENTATION
+#include "hotpp/hotpp.h"
+```
+
+Then:
+- compile with `-g -fpatchable-function-entry=7,5`, plus `-fno-ipa-icf` with GCC
+- link with `-ldl -pthread`
+- keep `compile_commands.json` in the build tree; the agent finds it next to the executable or in a parent directory
+
+With CMake, `hotpp_enable(game NO_AGENT)` sets those flags.
+
+**In your code:**
 
 ```cpp
 #include <hotpp/hotpp.h>
 
 int main() {
-    hotpp::init();             // connects to the host; returns false if unavailable
+    hotpp::init();                 // returns false if no host is available; the program runs normally
     while (running) {
-        hotpp::sync_point();   // patches are applied here
+        hotpp::sync_point();       // patches are applied here
         update();
     }
     hotpp::shutdown();
 }
 ```
 
-Then either start the program under the host:
+## Use
 
 ```bash
-hotpp -- ./game
+hotpp -- ./game          # start the program under a host
 ```
 
-or run `hotpp` in a terminal and start the program normally. If no host is listening, the agent launches one.
+Or run `hotpp` in one terminal and start the program normally; if no host is listening, the agent launches one.
 
-Now edit a `.cpp` file the program is built from and save. The host recompiles it with the build's own command, links it against the running program and the change takes effect at the next `sync_point()`:
+Edit and save any `.cpp` file or header the program is built from:
 
 ```
 [hotpp] compiling game.cpp
-[hotpp] patch 1 applied in 50 ms: game.cpp (2 functions replaced, 0 new, 1 variable kept, 4.0 KiB)
+[hotpp] patch 1 applied in 48 ms: game.cpp (2 functions replaced, 0 new, 1 variable kept, 8.0 KiB)
 ```
 
-`hotpp -v` also prints the full module list on connect and what happened to every symbol in each patch. To try it, run the example (`build/examples/hotpp_example_basic` under `hotpp --`) and edit `examples/basic/game.cpp`.
+Debug patched code with gdb as usual: breakpoints, stepping and backtraces work in it.
 
-### Hooks, async mode, debugging
+## API
 
-```cpp
-static void reload_assets() { /* ... */ }
-HOTPP_POST_PATCH(reload_assets);   // runs after every patch is live (HOTPP_PRE_PATCH: before)
+| | |
+|---|---|
+| `bool init(const Config& = {})` | Connect to the host. Call once. |
+| `void sync_point()` | Apply pending patches. Call where no patched code is mid-update, e.g. the top of the main loop. |
+| `void shutdown()` | Disconnect. |
+| `bool connected()` | Connected to a host. |
+| `bool restarted()` | This process was started by a hot restart. |
+| `HOTPP_PRE_PATCH(fn)`, `HOTPP_POST_PATCH(fn)` | Run `void fn()` before / after every patch (rebuild caches, reload data). |
+| `HOTPP_PRE_RESTART(fn)` | Run `void fn()` before a hot restart (save state). |
+
+`Config` fields: `compile_commands`, `endpoint`, `host_path`, `launch_host`, `async` (apply patches on the agent thread, for programs without a main loop) and `region_size`. Defining `HOTPP_DISABLE` compiles everything to no-ops.
+
+## Host
+
+```
+hotpp [options] [--once]                 wait for programs to connect
+hotpp [options] -- <program> [args...]   start a program under the host
 ```
 
-- **Programs without a main loop:** set `Config::async = true` (or `HOTPP_ASYNC=1`), and patches apply on the agent thread as soon as they arrive.
-- **gdb** sees patched code automatically: breakpoints by function or `file:line`, stepping and backtraces work. When debugging a multithreaded program while patching, run `handle SIG38 nostop noprint pass` in gdb; HotPP pauses threads with that real-time signal.
-- **Layout changes:** if a struct's layout changes (a header gains a member), the host warns. Objects created before the patch keep the old layout.
+| Option | |
+|---|---|
+| `--build "<command>"` | Rebuild command for hot restarts, e.g. `"cmake --build build"`. |
+| `--auto-restart` | When a change can't be patched, rebuild and restart the program (same pid, same arguments). |
+| `-v` | Print every module at connect and every symbol decision per patch. |
+| `--endpoint <path>` | Socket to listen on. |
 
-### Hot restart
+`kill -USR1 <host pid>` rebuilds and restarts every connected program on demand.
 
-Changes HotPP can't patch (a resized global, a new `thread_local`) can be rebuilt and restarted automatically:
+| Environment | |
+|---|---|
+| `HOTPP_DISABLE=1` | Turn hot reload off. |
+| `HOTPP_ASYNC=1` | Same as `Config::async`. |
+| `HOTPP_HOST`, `HOTPP_LAUNCH_HOST=0` | Host to launch / don't launch one. |
+| `HOTPP_ENDPOINT`, `HOTPP_COMPILE_COMMANDS` | Override the socket / `compile_commands.json` path. |
+| `NO_COLOR` | Plain host output. |
+
+## What needs a restart
+
+HotPP rejects these and leaves the program untouched (with `--auto-restart`, it rebuilds and restarts instead):
+- a global or static that changes size or type
+- a new `thread_local`
+- a new use of a shared-library variable the program didn't use before (GCC)
+
+It **warns** when a struct's layout changes (a header gains a member): objects created before the patch keep the old layout. When a file gains a dynamically initialized global, that file's other initializers re-run into scratch copies, so their side effects repeat.
+
+## Tips
+
+- **"waiting for the app to call hotpp::sync_point()":** the program isn't calling it. Call it, or use async mode.
+- **gdb stops with SIG38 while patching:** HotPP pauses threads with that signal. Run `handle SIG38 nostop noprint pass`.
+- **"was rebuilt since the program started":** the executable on disk no longer matches the running one. Restart the program, or use `--auto-restart`.
+- **Not supported:** LTO, stripped binaries, `-Wl,--gc-sections`, and shared libraries loaded with `dlopen` after startup.
+
+## Develop
 
 ```bash
-hotpp --build "cmake --build build" --auto-restart -- ./game
+ctest --test-dir build --output-on-failure   # unit + end-to-end tests (gdb optional)
+cmake --build build --target hotpp_single_header   # after changing the agent
 ```
-
-The host runs the build command, and the program re-executes itself with the same arguments, keeping its pid. `kill -USR1 <host pid>` does the same on demand. Save state in a `HOTPP_PRE_RESTART(fn)` hook, and restore it when `hotpp::restarted()` is true.
-
-| Variable | Effect |
-|---|---|
-| `HOTPP_ENDPOINT` | Socket path / pipe name used by the host and the agent |
-| `HOTPP_HOST` | Host executable the agent launches (default `hotpp` on `PATH`) |
-| `HOTPP_LAUNCH_HOST=0` | Don't launch a host |
-| `HOTPP_DISABLE=1` | Turn hot reload off at runtime |
-| `HOTPP_COMPILE_COMMANDS` | Override the `compile_commands.json` path |
-| `HOTPP_ASYNC=1` | Apply patches on the agent thread instead of in `sync_point()` |
-| `NO_COLOR` | Plain host output on a terminal |
