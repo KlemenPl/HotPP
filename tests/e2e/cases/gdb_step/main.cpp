@@ -18,14 +18,14 @@ void case_setup() {}
 void case_frame(int) {
     update();
     last = value();
-    E2E_EXPECT(last == 2 * counter || last == 100 + 2 * counter);
-    if (last >= 100 && !reported) {
+    E2E_EXPECT(last == 2 * counter || last == 1000000 + 2 * counter);
+    if (last >= 1000000 && !reported) { // only the new code reaches this
         reported = true;
         e2e_patched(last);
     }
 }
 
 int case_finish() {
-    E2E_EXPECT(last >= 100);
+    E2E_EXPECT(last >= 1000000);
     return 0;
 }

@@ -20,9 +20,9 @@ void case_frame(int frame) {
     if (!plugin_value) return;
     const int v = plugin_value();
     ++calls;
-    E2E_EXPECT(v % 1000 == calls);                 // its static survived
-    E2E_EXPECT(v / 1000 == 1 || v / 1000 == 2);
-    last = v / 1000;
+    E2E_EXPECT(v % 1000000 == calls);           // its static survived
+    E2E_EXPECT(v / 1000000 == 1 || v / 1000000 == 2);
+    last = v / 1000000;
     if (last == 2 && calls > 20 && handle) {     // patched and used for a while: unload it
         dlclose(handle);
         handle = nullptr;

@@ -172,6 +172,8 @@ def main() -> int:
             for dst, src in step.get("copy", {}).items():
                 shutil.copyfile(os.path.join(args.case, src), os.path.join(args.work, dst))
             expect = step["expect"]
+            if step.get("from_start"):  # what the step waits for may already have happened
+                pos = 0
             for pattern in expect if isinstance(expect, list) else [expect]:
                 pos = out.wait_for(pattern, pos, t())
             pos = out.wait_for(r"^frame \d+$", pos, t(), count=settle)

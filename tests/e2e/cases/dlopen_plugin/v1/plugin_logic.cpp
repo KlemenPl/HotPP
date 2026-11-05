@@ -2,5 +2,5 @@
 static int calls = 0;
 extern "C" int plugin_value() {
     ++calls;
-    return 1 * 1000 + calls; // calls must keep counting across the patch
+    return 1 * 1000000 + calls; // calls must keep counting across the patch
 }

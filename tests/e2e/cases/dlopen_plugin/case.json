@@ -3,7 +3,8 @@
     {
       "name": "the program loads the plugin",
       "copy": {},
-      "expect": "^\\[hotpp\\] watching 1 source file of libhotpp_e2e_dlopen_plugin_plugin\\.so \\(loaded at runtime\\)"
+      "expect": "^\\[hotpp\\] watching 1 source file of libhotpp_e2e_dlopen_plugin_plugin\\.so \\(loaded at runtime\\)",
+      "from_start": true
     },
     {
       "name": "patch the plugin",
