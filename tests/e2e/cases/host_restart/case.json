@@ -1,0 +1,42 @@
+{
+  "serve": true,
+  "steps": [
+    {
+      "name": "patch with the first host",
+      "copy": {
+        "game.cpp": "v2/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied"
+    },
+    {
+      "name": "the host crashes and is restarted",
+      "restart_host": "KILL",
+      "expect": [
+        "reconnected to the host",
+        "^\\[hotpp\\] resumed the earlier host session.s patches; the next is patch 2"
+      ]
+    },
+    {
+      "name": "patch with the second host",
+      "copy": {
+        "game.cpp": "v3/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 2 applied"
+    },
+    {
+      "name": "the host is stopped and restarted",
+      "restart_host": "TERM",
+      "expect": [
+        "reconnected to the host",
+        "^\\[hotpp\\] resumed the earlier host session.s patches; the next is patch 3"
+      ]
+    },
+    {
+      "name": "patch with the third host",
+      "copy": {
+        "game.cpp": "v4/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 3 applied"
+    }
+  ]
+}

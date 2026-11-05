@@ -127,6 +127,7 @@ It **warns** when a struct's layout changes (a header gains a member): objects c
 
 - **"waiting for the app to call hotpp::sync_point()":** the program isn't calling it. Call it, or use async mode.
 - **gdb stops with SIG38 while patching:** HotPP pauses threads with that signal. Run `handle SIG38 nostop noprint pass`.
+- **Restarting the host** is safe: running programs reconnect and the new host continues from the previous one's patches. If it can't (its saved state is gone), it says so; restart the program then.
 - **"was rebuilt since the program started":** the executable on disk no longer matches the running one. Restart the program, or use `--auto-restart`.
 - **Not supported:** LTO, stripped binaries, `-Wl,--gc-sections`, and shared libraries loaded with `dlopen` after startup.
 
@@ -134,5 +135,6 @@ It **warns** when a struct's layout changes (a header gains a member): objects c
 
 ```bash
 ctest --test-dir build --output-on-failure   # unit + end-to-end tests (gdb optional)
+cmake -B build-asan -DHOTPP_SANITIZE=ON      # host and tests under ASan + UBSan
 cmake --build build --target hotpp_single_header   # after changing the agent
 ```

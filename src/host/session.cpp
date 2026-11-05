@@ -1,6 +1,7 @@
 #include "host/session.h"
 
 #include "host/deps.h"
+#include "host/session_state.h"
 #include "host/image/dwarf_types.h"
 #include "host/link/linker.h"
 #include "host/object/elf_object.h"
@@ -12,6 +13,8 @@
 #include <fstream>
 #include <functional>
 #include <sstream>
+
+#include <csignal>
 
 #include <unistd.h>
 
@@ -135,8 +138,16 @@ Session::~Session() {
     if (watch_thread_.joinable()) watch_thread_.join();
     if (scan_thread_.joinable()) scan_thread_.join();
     if (!patch_dir_.empty()) {
+        // While the process lives, keep the state file so a new host can resume
+        // (docs/DESIGN.md §3.3); the compiled objects can go.
         std::error_code ec;
-        fs::remove_all(patch_dir_, ec);
+        const bool alive = hello_.pid && (::kill(pid_t(hello_.pid), 0) == 0 || errno == EPERM);
+        if (!alive) {
+            fs::remove_all(patch_dir_, ec);
+        } else {
+            for (const auto& e : fs::directory_iterator(patch_dir_, ec))
+                if (e.path().filename().string().rfind("patch-", 0) == 0) fs::remove_all(e.path(), ec);
+        }
     }
 }
 
@@ -288,6 +299,8 @@ void Session::start_hot_reload() {
         throw std::runtime_error("the app reported no compile_commands.json (use hotpp_enable() or set HOTPP_COMPILE_COMMANDS)");
     if (hello_.modules.empty() || hello_.regions.empty()) throw std::runtime_error("the app reported no patch region");
     db_ = CompileDb::load(hello_.compile_commands);
+    std::error_code time_ec;
+    db_time_ = fs::last_write_time(hello_.compile_commands, time_ec);
     patch_dir_ = fs::path(hello_.compile_commands).parent_path() / ".hotpp" / std::to_string(hello_.pid);
     // Module setup asks the agent for patch regions, whose replies the connection
     // thread reads, so it runs on the watcher thread.
@@ -345,21 +358,28 @@ void Session::setup_modules() {
             continue;
         }
         RegionRecord region;
-        if (exe) {
-            region = hello_.regions[0];
+        const auto existing = std::find_if(hello_.regions.begin(), hello_.regions.end(),
+                                           [&](const RegionRecord& r) { return r.module_index == i; });
+        if (existing != hello_.regions.end()) {
+            region = *existing; // the executable's, or one reserved for an earlier host session
+        } else if (exe) {
+            throw std::runtime_error("the app reported no patch region for " + m->name);
         } else if (auto r = reserve_region(uint32_t(i), hello_.regions[0].size)) {
             region = *r;
         } else {
             say("warning: no room for a patch region next to " + m->name + "; not patching it");
             continue;
         }
-        m->cursor = region.base;
+        m->region_base = region.base;
+        m->cursor = region.base + region.used;
         m->end = region.base + region.size;
         m->symbols.add_image(*m->image, rec.base);
         if (!exe) bind_interposed_variables(*m);
         for (const fs::path& u : m->units) units_.insert(u);
         modules_.push_back(std::move(m));
     }
+
+    resume_or_reset();
 
     std::vector<const CompileCommand*> program;
     for (const CompileCommand& c : db_->entries()) {
@@ -441,6 +461,65 @@ void Session::bind_interposed_variables(ModuleState& m) {
         say(plural(moved, "variable") + " of " + m.name + " live in another module (copy relocations)");
 }
 
+// A reconnecting agent (the host was restarted) may already carry patches. Resume
+// from the state the previous session saved, if it matches what the agent reports;
+// otherwise refuse, since new code could land on live code and the old patches'
+// symbols would be unknown.
+void Session::resume_or_reset() {
+    const fs::path file = patch_dir_ / "state";
+    std::error_code ec;
+    bool patched = false;
+    for (const RegionRecord& r : hello_.regions) patched |= r.used > 0;
+    if (!hello_.resumed) {
+        fs::remove(file, ec); // a new process (or a hot restart) with this pid
+        return;
+    }
+    const std::optional<SessionState> st = load_session_state(file);
+    if (!st) {
+        if (!patched) return; // reconnected before anything was patched
+        throw std::runtime_error("the program was patched by an earlier host session whose state is gone; "
+                                 "restart it to keep hot reloading");
+    }
+    auto mismatch = [] {
+        return std::runtime_error("the state saved by the earlier host session doesn't match the program; "
+                                  "restart it to keep hot reloading");
+    };
+    if (st->pid != hello_.pid || st->modules.size() > modules_.size()) throw mismatch();
+    for (const SavedModule& saved : st->modules) {
+        auto m = std::find_if(modules_.begin(), modules_.end(), [&](const auto& x) { return x->index == saved.index; });
+        if (m == modules_.end() || saved.index >= hello_.modules.size()) throw mismatch();
+        const ModuleRecord& rec = hello_.modules[saved.index];
+        if (saved.path != rec.path || saved.build_id != rec.build_id || saved.region_base != (*m)->region_base ||
+            saved.cursor != (*m)->cursor)
+            throw mismatch();
+    }
+    for (const auto& [index, delta] : st->deltas) {
+        auto m = std::find_if(modules_.begin(), modules_.end(), [&](const auto& x) { return x->index == index; });
+        if (m == modules_.end()) throw mismatch();
+        (*m)->symbols.apply(delta);
+    }
+    applied_ = st->deltas;
+    next_patch_ = st->next_patch;
+    say("resumed the earlier host session's patches; the next is patch " + std::to_string(next_patch_));
+}
+
+void Session::save_state() {
+    SessionState st;
+    st.pid = hello_.pid;
+    st.next_patch = next_patch_;
+    for (const auto& m : modules_) {
+        SavedModule s;
+        s.index = uint32_t(m->index);
+        s.path = hello_.modules[m->index].path;
+        s.build_id = hello_.modules[m->index].build_id;
+        s.region_base = m->region_base;
+        s.cursor = m->cursor;
+        st.modules.push_back(std::move(s));
+    }
+    st.deltas = applied_;
+    if (!save_session_state(patch_dir_ / "state", st)) say("warning: can't save the session state in " + patch_dir_.string());
+}
+
 std::optional<RegionRecord> Session::reserve_region(uint32_t module_index, uint64_t size) {
     ReserveRequest req;
     req.id = next_request_++;
@@ -496,8 +575,24 @@ bool Session::changed(const fs::path& file) {
     return true;
 }
 
+// A re-run of the build system rewrites compile_commands.json (new flags, new
+// files); later patches use the new commands.
+void Session::reload_compile_db_if_changed() {
+    std::error_code ec;
+    const auto t = fs::last_write_time(hello_.compile_commands, ec);
+    if (ec || t == db_time_) return;
+    try {
+        db_ = CompileDb::load(hello_.compile_commands);
+        db_time_ = t;
+        if (options_.verbose) say("reloaded " + hello_.compile_commands);
+    } catch (const std::exception& e) {
+        say(std::string("warning: keeping the previous compile commands: ") + e.what());
+    }
+}
+
 void Session::handle_changes(const std::vector<fs::path>& files) {
     const auto started = Clock::now();
+    reload_compile_db_if_changed();
     std::vector<const CompileCommand*> tus;
     std::set<fs::path> picked;
     auto add_tu = [&](const fs::path& file) {
@@ -658,6 +753,7 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
     encode(w, patch);
     if (!send(MsgType::Patch, w)) return;
     for (ModuleLink& l : links) l.module->cursor += l.result.bytes_used; // reserved even if applying fails
+    save_state();
 
     const std::optional<PatchResult> result = wait_for_result(id);
     if (!result) return; // disconnected
@@ -667,12 +763,14 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
     }
     for (ModuleLink& l : links) {
         l.module->symbols.apply(l.result.delta);
+        applied_.emplace_back(uint32_t(l.module->index), l.result.delta);
         for (auto& [name, layout] : l.module->pending_layouts) l.module->layouts[name] = layout; // warn once
     }
     std::string summary = plural(replaced, "function") + " replaced, " + std::to_string(fresh) + " new, " +
                           plural(kept, "variable") + " kept";
     if (inits) summary += ", " + plural(inits, "initializer") + " run";
     if (links.size() > 1) summary += ", " + std::to_string(links.size()) + " modules";
+    save_state();
     say("patch " + std::to_string(id) + " applied in " + ms_since(started) + ": " + names + " (" + summary + ", " +
         format_size(bytes) + ")");
 }

@@ -62,13 +62,15 @@ private:
         std::unique_ptr<image::ElfImage> image;
         link::SymbolIndex symbols;
         std::set<std::filesystem::path> units; // sources it was built from
-        uint64_t cursor = 0, end = 0;          // its patch region
+        uint64_t region_base = 0, cursor = 0, end = 0; // its patch region
         std::unordered_map<std::string, image::TypeLayout> layouts, pending_layouts;
         bool layouts_ok = false;
     };
 
     void start_hot_reload();
     void setup_modules();
+    void resume_or_reset();
+    void save_state();
     std::optional<proto::RegionRecord> reserve_region(uint32_t module_index, uint64_t size);
     void bind_interposed_variables(ModuleState& module);
     void watch_loop();
@@ -89,6 +91,8 @@ private:
 
     // Hot reload state, owned by the watcher thread once started.
     std::optional<CompileDb> db_;
+    std::filesystem::file_time_type db_time_{};
+    void reload_compile_db_if_changed();
     std::vector<std::unique_ptr<ModuleState>> modules_; // [0] is the executable
     std::set<std::filesystem::path> units_;              // sources of all of them
     std::unordered_map<std::string, size_t> content_hash_;
@@ -101,6 +105,7 @@ private:
     std::atomic<bool> scan_done_{false};
     std::atomic<bool> layouts_ready_{false}; // struct layouts read (after the dependency scan)
     std::filesystem::path patch_dir_;
+    std::vector<std::pair<uint32_t, link::IndexDelta>> applied_; // every applied delta, for the state file
     uint32_t next_patch_ = 1;
     uint32_t next_request_ = 1;
     std::thread watch_thread_;

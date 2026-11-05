@@ -24,6 +24,7 @@ struct RegionRecord {
     uint64_t base = 0;
     uint64_t size = 0;
     uint32_t module_index = 0; // module the region sits within rel32 reach of
+    uint64_t used = 0;         // bytes from `base` holding patches already applied
 };
 
 struct Hello {
@@ -34,6 +35,7 @@ struct Hello {
     std::string compile_commands;
     std::vector<ModuleRecord> modules; // [0] is the main executable
     std::vector<RegionRecord> regions;
+    bool resumed = false; // reconnecting after losing the host: patches may already be applied
 };
 
 struct HelloAck {
@@ -139,12 +141,14 @@ inline void encode(Writer& w, const Hello& m) {
         w.u64(reg.base);
         w.u64(reg.size);
         w.u32(reg.module_index);
+        w.u64(reg.used);
     }
+    w.u8(m.resumed ? 1 : 0);
 }
 
 inline bool decode(Reader& r, Hello& m) {
     constexpr size_t kModuleMin = 8 + 8 + 8 + 4 + 4 + 17;
-    constexpr size_t kRegionMin = 8 + 8 + 4;
+    constexpr size_t kRegionMin = 8 + 8 + 4 + 8;
     m.pid = r.u32();
     m.platform = Platform(r.u8());
     m.arch = Arch(r.u8());
@@ -170,7 +174,9 @@ inline bool decode(Reader& r, Hello& m) {
         reg.base = r.u64();
         reg.size = r.u64();
         reg.module_index = r.u32();
+        reg.used = r.u64();
     }
+    m.resumed = r.u8() != 0;
     return r.ok() && r.at_end();
 }
 

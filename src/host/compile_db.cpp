@@ -50,6 +50,30 @@ std::vector<std::string> split_command_line(const std::string& command) {
     return out;
 }
 
+// Splices @file arguments in, as the compiler would read them, so the output and
+// dependency flags inside a response file can be rewritten too. A response file
+// that can't be read is left as is.
+std::vector<std::string> expand_response_files(const std::vector<std::string>& args, const fs::path& directory,
+                                               int depth) {
+    std::vector<std::string> out;
+    for (const std::string& a : args) {
+        if (a.size() < 2 || a[0] != '@' || depth > 8) {
+            out.push_back(a);
+            continue;
+        }
+        std::ifstream in(normalize_path(a.substr(1), directory), std::ios::binary);
+        if (!in) {
+            out.push_back(a);
+            continue;
+        }
+        std::stringstream ss;
+        ss << in.rdbuf();
+        for (std::string& e : expand_response_files(split_command_line(ss.str()), directory, depth + 1))
+            out.push_back(std::move(e));
+    }
+    return out;
+}
+
 CompileDb CompileDb::load(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) throw std::runtime_error("cannot read " + path.string());
@@ -75,6 +99,7 @@ CompileDb CompileDb::parse(const std::string& text, const fs::path& origin) {
             cmd.arguments = split_command_line(command->as_string());
         }
         if (cmd.arguments.empty()) throw std::runtime_error(origin.string() + ": entry for " + cmd.file.string() + " has no command");
+        cmd.arguments = expand_response_files(cmd.arguments, cmd.directory, 0);
         db.by_file_.emplace(cmd.file.string(), db.entries_.size());
         db.entries_.push_back(std::move(cmd));
     }

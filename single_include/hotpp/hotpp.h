@@ -133,7 +133,7 @@ struct HookRegistrar {
 namespace hotpp::proto {
 
 constexpr uint32_t kMagic = 0x50544F48; // "HOTP"
-constexpr uint16_t kVersion = 6;
+constexpr uint16_t kVersion = 7;
 constexpr size_t kHeaderSize = 12;
 constexpr uint32_t kMaxPayload = 1u << 30;
 
@@ -328,6 +328,7 @@ struct RegionRecord {
     uint64_t base = 0;
     uint64_t size = 0;
     uint32_t module_index = 0; // module the region sits within rel32 reach of
+    uint64_t used = 0;         // bytes from `base` holding patches already applied
 };
 
 struct Hello {
@@ -338,6 +339,7 @@ struct Hello {
     std::string compile_commands;
     std::vector<ModuleRecord> modules; // [0] is the main executable
     std::vector<RegionRecord> regions;
+    bool resumed = false; // reconnecting after losing the host: patches may already be applied
 };
 
 struct HelloAck {
@@ -443,12 +445,14 @@ inline void encode(Writer& w, const Hello& m) {
         w.u64(reg.base);
         w.u64(reg.size);
         w.u32(reg.module_index);
+        w.u64(reg.used);
     }
+    w.u8(m.resumed ? 1 : 0);
 }
 
 inline bool decode(Reader& r, Hello& m) {
     constexpr size_t kModuleMin = 8 + 8 + 8 + 4 + 4 + 17;
-    constexpr size_t kRegionMin = 8 + 8 + 4;
+    constexpr size_t kRegionMin = 8 + 8 + 4 + 8;
     m.pid = r.u32();
     m.platform = Platform(r.u8());
     m.arch = Arch(r.u8());
@@ -474,7 +478,9 @@ inline bool decode(Reader& r, Hello& m) {
         reg.base = r.u64();
         reg.size = r.u64();
         reg.module_index = r.u32();
+        reg.used = r.u64();
     }
+    m.resumed = r.u8() != 0;
     return r.ok() && r.at_end();
 }
 
@@ -1618,6 +1624,9 @@ struct AgentState {
     bool initialized = false;
 
     bool async = false; // apply patches on the agent thread as they arrive
+    std::string endpoint;
+    Hello hello;                   // resent, marked resumed, after reconnecting
+    std::atomic<bool> stopping{false}; // shutdown() or a hot restart: don't reconnect
     std::string exe;               // executable path at startup: a rebuild replaces this file
     std::vector<std::string> argv; // command line, for hot restart
     std::atomic<bool> restart_pending{false};
@@ -1672,6 +1681,7 @@ bool send_message(AgentState& s, MsgType type, const Writer& w) {
     uint8_t header[kHeaderSize];
     encode_header(header, type, uint32_t(w.size()));
     std::lock_guard<std::mutex> lock(s.send_mutex);
+    if (!s.conn) return false;
     return agent::ipc_send(s.conn, header, sizeof header) &&
            (w.size() == 0 || agent::ipc_send(s.conn, w.data(), w.size()));
 }
@@ -1703,7 +1713,11 @@ void restart_now() {
     const char* count = std::getenv("HOTPP_RESTARTED");
     setenv("HOTPP_RESTARTED", std::to_string((count ? std::atoi(count) : 0) + 1).c_str(), 1);
     std::fflush(nullptr);
-    if (s.conn) agent::ipc_shutdown(s.conn); // the host sees the old session end
+    s.stopping = true;
+    {
+        std::lock_guard<std::mutex> lock(s.send_mutex);
+        if (s.conn) agent::ipc_shutdown(s.conn); // the host sees the old session end
+    }
     const std::string error = agent::exec_self(s.exe, s.argv);
     agent::log("hot restart failed: %s; the program keeps running without hot reload", error.c_str());
 }
@@ -1720,6 +1734,15 @@ void apply_and_report(const Patch& patch) {
     }
     result.error = agent::apply_patch(patch, regions, s.modules);
     result.ok = result.error.empty();
+    {
+        // How much of each region is taken, so a host that reconnects later doesn't
+        // place new code over it. Counted even if applying failed half way.
+        std::lock_guard<std::mutex> lock(s.region_mutex);
+        for (const Segment& seg : patch.segments)
+            for (RegionRecord& r : s.regions)
+                if (seg.addr >= r.base && seg.addr + seg.size <= r.base + r.size)
+                    r.used = std::max(r.used, seg.addr + seg.size - r.base);
+    }
     if (result.ok) run_hooks(detail::HookKind::PostPatch);
     else agent::log("patch %u failed: %s", unsigned(patch.id), result.error.c_str());
     Writer w;
@@ -1727,8 +1750,10 @@ void apply_and_report(const Patch& patch) {
     if (s.connected) send_message(s, MsgType::PatchResult, w);
 }
 
-void reader_main(void*) {
-    agent::mark_agent_thread();
+bool reconnect();
+
+// Serves one connection until it ends.
+void serve_connection() {
     AgentState& s = state();
     Header h;
     std::vector<uint8_t> payload;
@@ -1789,7 +1814,55 @@ void reader_main(void*) {
         }
         // Unknown message types are skipped, so newer hosts can add messages.
     }
-    s.connected = false;
+}
+
+void reader_main(void*) {
+    agent::mark_agent_thread();
+    AgentState& s = state();
+    for (;;) {
+        serve_connection();
+        s.connected = false;
+        if (s.stopping || !reconnect()) return;
+    }
+}
+
+// The host went away (crashed, or was restarted): keep trying to reach one on the
+// same endpoint, and tell it which patches are already in place.
+bool reconnect() {
+    AgentState& s = state();
+    agent::log("lost the host; reconnecting to %s", s.endpoint.c_str());
+    unsigned delay = 250;
+    while (!s.stopping) {
+        for (unsigned waited = 0; waited < delay && !s.stopping; waited += 50) agent::sleep_ms(50);
+        if (s.stopping) break;
+        agent::Connection* c = agent::ipc_connect(s.endpoint);
+        delay = std::min(delay * 2, 5000u);
+        if (!c) continue;
+        agent::Connection* old;
+        {
+            std::lock_guard<std::mutex> lock(s.send_mutex);
+            old = s.conn;
+            s.conn = c;
+        }
+        if (old) agent::ipc_close(old);
+
+        Hello hello = s.hello;
+        hello.resumed = true;
+        {
+            std::lock_guard<std::mutex> lock(s.region_mutex);
+            hello.regions = s.regions;
+        }
+        Writer w;
+        encode(w, hello);
+        Header h;
+        std::vector<uint8_t> payload;
+        if (send_message(s, MsgType::Hello, w) && recv_message(s, h, payload) && h.type == MsgType::HelloAck) {
+            s.connected = true;
+            agent::log("reconnected to the host on %s", s.endpoint.c_str());
+            return true;
+        }
+    }
+    return false;
 }
 
 // Config value, then environment variable, then fallback.
@@ -1888,8 +1961,10 @@ bool init(const Config& cfg) {
     }
     hello.regions = s.regions;
     s.modules = hello.modules;
+    s.hello = hello;
 
     const std::string endpoint = pick(cfg.endpoint, "HOTPP_ENDPOINT", default_endpoint());
+    s.endpoint = endpoint;
     s.conn = connect_or_launch(endpoint, cfg);
     if (!s.conn) {
         agent::log("no host on %s; running without hot reload", endpoint.c_str());
@@ -1958,15 +2033,19 @@ void register_hook(HookKind kind, void (*fn)()) {
 
 void shutdown() {
     AgentState& s = state();
-    if (!s.conn) return;
+    if (!s.reader) return;
+    s.stopping = true;
     Writer bye;
     send_message(s, MsgType::Bye, bye);
-    agent::ipc_shutdown(s.conn);
+    {
+        std::lock_guard<std::mutex> lock(s.send_mutex);
+        if (s.conn) agent::ipc_shutdown(s.conn);
+    }
     if (s.reader) {
         agent::thread_join(s.reader);
         s.reader = nullptr;
     }
-    agent::ipc_close(s.conn);
+    if (s.conn) agent::ipc_close(s.conn);
     s.conn = nullptr;
     s.connected = false;
 }

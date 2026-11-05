@@ -102,6 +102,28 @@ The host listens and agents connect. One host serves any number of agents.
 | `Restart` | host → agent | re-exec the (rebuilt) executable (§8.8) |
 | `Log`, `Bye` | both | text for the user; orderly disconnect |
 
+### 3.3 Host restarts and reconnecting
+The host may crash or be restarted while programs keep running.
+
+**The agent:**
+- remembers its endpoint and its hello
+- tracks how much of each patch region holds applied patches (`RegionRecord::used`, counted even when applying fails half way)
+- when the connection drops without a `shutdown()` or a hot restart, retries with backoff (250 ms up to 5 s) and sends the hello again, marked `resumed`
+
+**The host** writes a state file, `<build>/.hotpp/<pid>/state`, after every patch. It holds:
+- each module's path, build ID, region base and cursor
+- every applied index delta (new symbols and function versions), in order
+- the next patch number
+
+When a session ends while the process is still alive, the state file stays (only the compiled objects are removed). When a `resumed` hello arrives:
+- the state file must exist, name the same pid and modules, and have cursors equal to the agent's `used` values
+- the deltas are replayed into the fresh indexes, and patching continues with the next patch number
+- regions already reserved for libraries are reused
+
+If the state is missing (and something was patched) or doesn't match, the host refuses to patch, with a message to restart the program. New code could otherwise land on live code, and the old patches' new symbols would be unknown. A hello that isn't `resumed` (a new process, or a hot restart reusing the pid) deletes any stale state file.
+
+The host itself shuts down cleanly on `SIGINT`/`SIGTERM`: it stops accepting, removes the socket file, ends open connections and joins the session threads. In run mode, it passes `SIGTERM` (or a second Ctrl+C) on to the program.
+
 ---
 
 ## 4. Build requirements
@@ -144,12 +166,14 @@ Optimization level is free; `-O0` and `-O2` are tested (§12).
 
 ### 5.3 Recompiling
 1. Affected set = the changed `.cpp` file, or every TU whose include set contains the changed header. TUs that aren't part of the running program (other targets in the same build) are left out.
-2. Each TU compiles with its exact `arguments`/`command` from `compile_commands.json`, with these changes only:
+2. Each TU compiles with its exact `arguments`/`command` from `compile_commands.json`. Response files (`@file`, nested ones too) are expanded first, so flags inside them can be rewritten. The command gets these changes only:
    - the output goes to `<build>/.hotpp/<pid>/patch-<n>/`
    - the build's own dependency-file flags (`-MD`, `-MF`, …) are dropped, so its `.d` files aren't overwritten
    - `-ffunction-sections -fdata-sections` are added (§7.2)
 3. All affected TUs compile in parallel and go into a single patch.
 4. On any failure, the compiler output is shown and nothing is applied. The next save retries.
+
+`compile_commands.json` is reloaded whenever it changes on disk (the build system was re-run), so later patches use the new flags.
 
 Header edits can recompile many TUs. That is the price of correctness: every TU that included the header may have inlined its code. Live++ makes the same trade-off.
 
@@ -455,6 +479,8 @@ Each milestone ends with a git commit, pushed to the Gitea remote, once its "don
 ## 12. Testing
 
 ### Unit tests (`tests/unit`)
+- corrupted input: a real object file and the test binary are mutated thousands of times and fed through the ELF, DWARF and linker code; they must be rejected, never crash (`HOTPP_FUZZ_ITERATIONS` scales it). With `-DHOTPP_SANITIZE=ON`, the host and the tests are built with ASan and UBSan, and the whole suite runs under them.
+- the session state file round trip and its rejection of corrupt files
 - protocol encoding and decoding
 - region placement
 - JSON, compile DB and depfile parsing
@@ -497,6 +523,7 @@ The program checks its invariants every frame (state never resets, old and new r
 | `shared_lib` | Code in a shared library (`lib_*.cpp` in the case) is patched: its global (copy-relocated into the executable), `static` and `thread_local` keep their values, and it calls back into the executable. |
 | `restart` | A resized global is rebuilt and restarted with `--build … --auto-restart`; the pre-restart hook saves state, the restarted process (same pid) sees `restarted()`, reads it back and runs the new code. The harness rebuilds the program from v1 afterwards. |
 | `single_header` | A program built with only the single header (no agent library, no `compile_commands.json` path built in) connects, finds `compile_commands.json` itself, is patched and runs its hook. |
+| `host_restart` | The host is killed (`SIGKILL`) and restarted, later stopped (`SIGTERM`) and restarted; each time the agent reconnects, the new host resumes the patch history (numbering, function versions, a variable a patch added), and further patches apply with all state intact. |
 | `gdb_step` | Under gdb: a breakpoint in new code, locals and kept globals, a backtrace into old code, `finish` (§9). Runs only if gdb is installed. |
 
 **Matrix:** {GCC, Clang} × {Debug (`-O0`), Release (`-O2`)}, in four build directories. With gdb mode, `case.json` can also run the program under gdb (`"gdb": "<script>"`, `"expect_output": [...]`). `"env"` sets environment variables, and a step's `"expect"` may list several lines in order.

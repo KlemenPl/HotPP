@@ -2,6 +2,10 @@
 #include "unit/test.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
+
+#include <unistd.h>
 
 using namespace hotpp;
 
@@ -55,4 +59,25 @@ HOTPP_TEST(patch_arguments_redirect_output_and_drop_depfiles) {
     cmd.arguments = {"c++", "-ox.o", "-c", "x.cpp"};
     const auto joined = patch_compile_arguments(cmd, "/tmp/y.o");
     CHECK(!has(joined, "-ox.o"));
+}
+
+HOTPP_TEST(response_files_are_expanded) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("hotpp-rsp-" + std::to_string(::getpid()));
+    fs::create_directories(dir / "sub");
+    {
+        std::ofstream(dir / "args.rsp") << "-O2 \"-DNAME=a b\" @sub/more.rsp -o x.o";
+        std::ofstream(dir / "sub/more.rsp") << "-MD -MF x.o.d";
+    }
+    const CompileDb db = CompileDb::parse(R"([{"directory": ")" + dir.string() +
+                                              R"(", "file": "x.cpp", "command": "c++ @args.rsp -c x.cpp"}])",
+                                          dir / "compile_commands.json");
+    const auto& a = db.entries().at(0).arguments;
+    CHECK(has(a, "-DNAME=a b"));
+    CHECK(has(a, "-MD")); // from the nested file
+    CHECK(!has(a, "@args.rsp"));
+    const auto patched = patch_compile_arguments(db.entries()[0], "/tmp/p.o");
+    CHECK(!has(patched, "x.o")); // the -o inside the response file was rewritten
+    CHECK(!has(patched, "-MD"));
+    fs::remove_all(dir);
 }

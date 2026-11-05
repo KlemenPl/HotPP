@@ -13,7 +13,8 @@ if(TARGET hotpp_host_lib)
         unit/compile_db_test.cpp
         unit/deps_test.cpp
         unit/json_test.cpp
-        unit/patch_site_test.cpp)
+        unit/patch_site_test.cpp
+        unit/session_state_test.cpp)
     target_link_libraries(hotpp_unit_tests PRIVATE hotpp_host_lib)
 
     # The ELF tests link a real object file compiled the way patch compiles are.
@@ -91,7 +92,7 @@ if(TARGET hotpp AND Python3_Interpreter_FOUND)
     foreach(case
             state new_global header_inline virtual_change lambda_template exceptions
             thread_spin repeat tls restart_required compile_error hooks async layout_warning
-            shared_lib restart)
+            shared_lib restart host_restart)
         hotpp_e2e_case(${case})
     endforeach()
 

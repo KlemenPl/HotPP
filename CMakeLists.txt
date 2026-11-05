@@ -47,6 +47,7 @@ if(HOTPP_BUILD_HOST)
         src/host/compile_db.cpp
         src/host/deps.cpp
         src/host/session.cpp
+        src/host/session_state.cpp
         src/host/elf/elf_file.cpp
         src/host/image/dwarf.cpp
         src/host/image/dwarf_reader.cpp

@@ -31,6 +31,10 @@ private:
     std::unordered_map<std::string, size_t> by_file_;
 };
 
+// Replaces @file arguments (resolved against `directory`) with the arguments in them.
+std::vector<std::string> expand_response_files(const std::vector<std::string>& args,
+                                               const std::filesystem::path& directory, int depth = 0);
+
 // Splits a shell command line (POSIX quoting rules) into arguments.
 std::vector<std::string> split_command_line(const std::string& command);
 

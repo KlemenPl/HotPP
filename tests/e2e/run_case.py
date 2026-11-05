@@ -14,6 +14,10 @@ the next build doesn't recompile the test program.
 With "gdb" in case.json, the program runs under gdb with that script instead,
 connected to a separate host, and "expect_output" lists lines the script must
 print (in order) after the last step.
+
+With "serve": true, the host runs on its own and the program connects to it; a
+step with "restart_host": "KILL" or "TERM" stops the host with that signal and
+starts a new one before waiting for the step's lines.
 """
 import argparse
 import json
@@ -34,10 +38,15 @@ class Output:
     def __init__(self, procs):
         self.lines = []
         self._queue = queue.Queue()
-        self._open = len(procs)
+        self._open = 0
         self.closed = False
         for proc in procs:
-            threading.Thread(target=self._pump, args=(proc,), daemon=True).start()
+            self.add(proc)
+
+    def add(self, proc):
+        self._open += 1
+        self.closed = False
+        threading.Thread(target=self._pump, args=(proc,), daemon=True).start()
 
     def _pump(self, proc):
         for line in proc.stdout:
@@ -126,7 +135,16 @@ def main() -> int:
     host_args = [expand(a) for a in spec.get("host_args", [])]
     popen = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
     procs = []
-    if "gdb" in spec:
+    host_cmd = None
+    if spec.get("serve"):
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+        endpoint = os.path.join(runtime, f"hotpp-e2e-{os.getpid()}.sock")
+        host_cmd = [args.host, *host_args, "--endpoint", endpoint]
+        procs.append(subprocess.Popen(host_cmd, env=env, **popen))
+        time.sleep(0.3)
+        env.update(HOTPP_ENDPOINT=endpoint, HOTPP_LAUNCH_HOST="0")
+        procs.append(subprocess.Popen([args.exe], env=env, **popen))
+    elif "gdb" in spec:
         runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
         endpoint = os.path.join(runtime, f"hotpp-e2e-{os.getpid()}.sock")
         procs.append(subprocess.Popen([args.host, *host_args, "--endpoint", endpoint, "--once"], env=env, **popen))
@@ -145,7 +163,13 @@ def main() -> int:
         pos = max(pos, out.wait_for(r"^frame 2$", 0, t()))
         for n, step in enumerate(spec["steps"], 1):
             print(f"--- step {n}: {step.get('name', '')}", flush=True)
-            for dst, src in step["copy"].items():
+            if "restart_host" in step:
+                host = procs[0]
+                host.send_signal(getattr(signal, "SIG" + step["restart_host"]))
+                host.wait(timeout=15)
+                procs[0] = subprocess.Popen(host_cmd, env=env, **popen)
+                out.add(procs[0])
+            for dst, src in step.get("copy", {}).items():
                 shutil.copyfile(os.path.join(args.case, src), os.path.join(args.work, dst))
             expect = step["expect"]
             for pattern in expect if isinstance(expect, list) else [expect]:
@@ -154,6 +178,9 @@ def main() -> int:
         for pattern in spec.get("expect_output", []):
             pos = out.wait_for(pattern, pos, t())
         open(stop_file, "w").close()
+        if spec.get("serve"):
+            procs[1].wait(timeout=15)        # the program finishes on its own
+            procs[0].send_signal(signal.SIGTERM)  # then the host is stopped
         out.drain(15)
         for proc in procs:
             code = proc.wait(timeout=15)
