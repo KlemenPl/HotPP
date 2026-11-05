@@ -1,0 +1,11 @@
+# find_package(HotPP): the agent (hotpp::agent), the host (hotpp::hotpp) and
+# hotpp_enable(<target> [NO_AGENT]).
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/HotPPTargets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/HotPP.cmake")
+
+check_required_components(HotPP)

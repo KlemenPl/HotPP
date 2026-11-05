@@ -1,0 +1,41 @@
+# Builds HotPP and runs the full test suite: {GCC, Clang} x {Debug, Release}, plus
+# the host and unit tests under ASan/UBSan.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+      # gdb_step debugs the test program; ptrace needs this inside a container.
+      options: --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build: [Debug, Release]
+        sanitize: [OFF]
+        include:
+          - compiler: clang
+            build: Debug
+            sanitize: ON
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git nodejs \
+            build-essential clang cmake python3 gdb
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          if [ "${{ matrix.compiler }}" = clang ]; then CXX=clang++; else CXX=g++; fi
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DCMAKE_CXX_COMPILER=$CXX \
+            -DHOTPP_SANITIZE=${{ matrix.sanitize }}
+      - name: Build
+        run: cmake --build build -j "$(nproc)"
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j "$(nproc)"

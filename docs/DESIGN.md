@@ -128,7 +128,12 @@ The host itself shuts down cleanly on `SIGINT`/`SIGTERM`: it stops accepting, re
 
 ## 4. Build requirements
 
-`cmake/HotPP.cmake` provides `hotpp_enable(<target>)`. It links `hotpp_agent`, applies the flags below, exports compile commands and disables IPO for the target. Users of other build systems apply the same flags by hand.
+`cmake/HotPP.cmake` provides `hotpp_enable(<target>)`. For an executable, it:
+- links `hotpp::agent` (unless `NO_AGENT`)
+- applies the flags below, exports compile commands and disables IPO
+- defines the build's `compile_commands.json` path, and the host's path when the `hotpp::hotpp` target exists, so the agent can launch the host without `PATH`
+
+`hotpp_enable()` comes with `add_subdirectory(HotPP)` and with the installed package (`find_package(HotPP)`; `cmake --install` puts the host, the agent library, both headers and the package files under the prefix). Users of other build systems apply the same flags by hand.
 
 | Flag | Why |
 |---|---|
@@ -524,6 +529,7 @@ The program checks its invariants every frame (state never resets, old and new r
 | `restart` | A resized global is rebuilt and restarted with `--build … --auto-restart`; the pre-restart hook saves state, the restarted process (same pid) sees `restarted()`, reads it back and runs the new code. The harness rebuilds the program from v1 afterwards. |
 | `single_header` | A program built with only the single header (no agent library, no `compile_commands.json` path built in) connects, finds `compile_commands.json` itself, is patched and runs its hook. |
 | `host_restart` | The host is killed (`SIGKILL`) and restarted, later stopped (`SIGTERM`) and restarted; each time the agent reconnects, the new host resumes the patch history (numbering, function versions, a variable a patch added), and further patches apply with all state intact. |
+| `install_and_consume` (not an e2e case) | Installs HotPP into a temporary prefix, builds a separate `find_package(HotPP)` project against it and runs it under the installed host. |
 | `gdb_step` | Under gdb: a breakpoint in new code, locals and kept globals, a backtrace into old code, `finish` (§9). Runs only if gdb is installed. |
 
 **Matrix:** {GCC, Clang} × {Debug (`-O0`), Release (`-O2`)}, in four build directories. With gdb mode, `case.json` can also run the program under gdb (`"gdb": "<script>"`, `"expect_output": [...]`). `"env"` sets environment variables, and a step's `"expect"` may list several lines in order.

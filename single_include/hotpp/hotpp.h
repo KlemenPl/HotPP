@@ -21,9 +21,12 @@
 
 #include <cstddef>
 
-// Set by hotpp_enable() to the build's compile_commands.json.
+// Set by hotpp_enable() to the build's compile_commands.json and the hotpp host.
 #ifndef HOTPP_DEFAULT_COMPILE_COMMANDS
 #define HOTPP_DEFAULT_COMPILE_COMMANDS nullptr
+#endif
+#ifndef HOTPP_DEFAULT_HOST
+#define HOTPP_DEFAULT_HOST nullptr
 #endif
 
 namespace hotpp {
@@ -35,8 +38,9 @@ struct Config {
     // Host endpoint (Unix socket path). Default: $HOTPP_ENDPOINT, then
     // $XDG_RUNTIME_DIR/hotpp.sock (or /tmp/hotpp-<uid>.sock).
     const char* endpoint = nullptr;
-    // Host executable to launch when none is listening. Default: $HOTPP_HOST, then "hotpp" on PATH.
-    const char* host_path = nullptr;
+    // Host executable to launch when none is listening. Default: $HOTPP_HOST, then the
+    // host hotpp_enable() found, then "hotpp" on PATH.
+    const char* host_path = HOTPP_DEFAULT_HOST;
     // Launch the host if none is listening. $HOTPP_LAUNCH_HOST=0 turns this off.
     bool launch_host = true;
     // Apply patches on the agent thread as soon as they arrive, instead of in
@@ -1894,7 +1898,8 @@ agent::Connection* connect_or_launch(const std::string& endpoint, const Config& 
     if (agent::Connection* c = agent::ipc_connect(endpoint)) return c;
     if (!cfg.launch_host || agent::get_env("HOTPP_LAUNCH_HOST") == "0") return nullptr;
 
-    const std::string host = pick(cfg.host_path, "HOTPP_HOST", "hotpp");
+    std::string host = agent::get_env("HOTPP_HOST");
+    if (host.empty()) host = cfg.host_path && *cfg.host_path ? cfg.host_path : "hotpp";
     agent::log("no host listening on %s, launching '%s'", endpoint.c_str(), host.c_str());
     if (!agent::spawn_detached(host, {"--endpoint", endpoint})) {
         agent::log("could not launch '%s'", host.c_str());

@@ -19,6 +19,8 @@ endif()
 
 find_package(Threads REQUIRED)
 include(cmake/HotPP.cmake)
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 set(HOTPP_WARNINGS -Wall -Wextra)
 
@@ -34,8 +36,9 @@ add_library(hotpp::agent ALIAS hotpp_agent)
 target_link_libraries(hotpp_agent PRIVATE ${CMAKE_DL_LIBS})
 
 target_include_directories(hotpp_agent
-    PUBLIC  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    PUBLIC  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE ${PROJECT_SOURCE_DIR}/src)
+set_target_properties(hotpp_agent PROPERTIES EXPORT_NAME agent)
 target_compile_features(hotpp_agent PUBLIC cxx_std_17)
 target_compile_options(hotpp_agent PRIVATE ${HOTPP_WARNINGS})
 target_link_libraries(hotpp_agent PRIVATE Threads::Threads)
@@ -74,6 +77,7 @@ if(HOTPP_BUILD_HOST)
     endif()
 
     add_executable(hotpp src/host/main.cpp)
+    add_executable(hotpp::hotpp ALIAS hotpp)
     target_compile_options(hotpp PRIVATE ${HOTPP_WARNINGS})
     target_link_libraries(hotpp PRIVATE hotpp_host_lib)
 endif()
@@ -86,6 +90,24 @@ if(Python3_Interpreter_FOUND)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         COMMENT "Generating single_include/hotpp/hotpp.h")
 endif()
+
+# --- install: host, agent, headers and a CMake package -----------------------
+#   find_package(HotPP) gives hotpp::agent, hotpp::hotpp and hotpp_enable().
+install(TARGETS hotpp_agent EXPORT HotPPTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+if(HOTPP_BUILD_HOST)
+    install(TARGETS hotpp EXPORT HotPPTargets RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+install(FILES include/hotpp/hotpp.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/hotpp)
+install(FILES single_include/hotpp/hotpp.h DESTINATION ${CMAKE_INSTALL_DATADIR}/hotpp/single_include/hotpp)
+set(HOTPP_CMAKE_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/HotPP)
+install(EXPORT HotPPTargets NAMESPACE hotpp:: DESTINATION ${HOTPP_CMAKE_DIR})
+configure_package_config_file(cmake/HotPPConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/HotPPConfig.cmake
+    INSTALL_DESTINATION ${HOTPP_CMAKE_DIR})
+write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/HotPPConfigVersion.cmake
+    COMPATIBILITY SameMinorVersion)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/HotPPConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/HotPPConfigVersion.cmake
+              cmake/HotPP.cmake
+        DESTINATION ${HOTPP_CMAKE_DIR})
 
 if(HOTPP_BUILD_EXAMPLES)
     add_subdirectory(examples)

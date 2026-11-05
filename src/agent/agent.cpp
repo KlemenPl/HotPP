@@ -320,7 +320,8 @@ agent::Connection* connect_or_launch(const std::string& endpoint, const Config& 
     if (agent::Connection* c = agent::ipc_connect(endpoint)) return c;
     if (!cfg.launch_host || agent::get_env("HOTPP_LAUNCH_HOST") == "0") return nullptr;
 
-    const std::string host = pick(cfg.host_path, "HOTPP_HOST", "hotpp");
+    std::string host = agent::get_env("HOTPP_HOST");
+    if (host.empty()) host = cfg.host_path && *cfg.host_path ? cfg.host_path : "hotpp";
     agent::log("no host listening on %s, launching '%s'", endpoint.c_str(), host.c_str());
     if (!agent::spawn_detached(host, {"--endpoint", endpoint})) {
         agent::log("could not launch '%s'", host.c_str());

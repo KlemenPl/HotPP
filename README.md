@@ -16,21 +16,23 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-This builds the host, `build/hotpp`. Put it on your `PATH`, or pass its path in `HOTPP_HOST`.
+This builds the host, `build/hotpp`. Programs built with `hotpp_enable()` know where it is; for others, put it on your `PATH` or set `HOTPP_HOST`.
+
+To install the host, the agent library, the headers and a CMake package, run `cmake --install build --prefix <dir>`.
 
 ## Add it to your program
 
-**With CMake:**
+**With CMake**, as a subdirectory or an installed package:
 
 ```cmake
-add_subdirectory(HotPP)
+add_subdirectory(HotPP)              # or: find_package(HotPP REQUIRED)
 add_executable(game main.cpp game.cpp)
 hotpp_enable(game)     # links the agent, sets the flags, exports compile_commands.json
 add_library(engine SHARED engine.cpp)
 hotpp_enable(engine)   # shared libraries are patched too
 ```
 
-**With the single header:** copy [`single_include/hotpp/hotpp.h`](single_include/hotpp/hotpp.h) into your project. In one `.cpp` file, ideally one you rarely edit:
+**With the single header:** copy [`single_include/hotpp/hotpp.h`](single_include/hotpp/hotpp.h) into your project (installed as `share/hotpp/single_include/hotpp/hotpp.h`). In one `.cpp` file, ideally one you rarely edit:
 
 ```cpp
 #define HOTPP_IMPLEMENTATION
@@ -136,5 +138,10 @@ It **warns** when a struct's layout changes (a header gains a member): objects c
 ```bash
 ctest --test-dir build --output-on-failure   # unit + end-to-end tests (gdb optional)
 cmake -B build-asan -DHOTPP_SANITIZE=ON      # host and tests under ASan + UBSan
+```
+
+CI (`.gitea/workflows/ci.yml`) runs the suite with GCC and Clang, Debug and Release, and under ASan/UBSan.
+
+```bash
 cmake --build build --target hotpp_single_header   # after changing the agent
 ```

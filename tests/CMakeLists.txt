@@ -112,3 +112,12 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME single_header_up_to_date
         COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/amalgamate.py --check)
 endif()
+
+# Install into a temporary prefix and build a find_package(HotPP) project against it.
+if(Python3_Interpreter_FOUND AND TARGET hotpp)
+    add_test(NAME install_and_consume
+        COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/install/run_install_test.py
+            --build-dir ${CMAKE_BINARY_DIR} --consumer ${CMAKE_CURRENT_SOURCE_DIR}/install/consumer
+            --cxx ${CMAKE_CXX_COMPILER})
+    set_tests_properties(install_and_consume PROPERTIES TIMEOUT 300)
+endif()
