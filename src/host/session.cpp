@@ -338,7 +338,7 @@ Session::ModuleState* Session::track_module(size_t i) {
     const ModuleRecord& rec = hello_.modules[i];
     const bool exe = i == 0;
     if (rec.size == 0 || (!exe && system_library(rec.path))) return nullptr;
-    auto m = std::make_unique<ModuleState>();
+    auto m = std::make_shared<ModuleState>();
     m->index = i;
     m->name = fs::path(rec.path).filename().string();
     try {
@@ -420,7 +420,7 @@ void Session::setup_modules() {
     // Which headers each source includes (header edits wait for this), then the
     // struct layouts for layout-change warnings.
     const fs::path cache = fs::path(hello_.compile_commands).parent_path() / ".hotpp" / "deps";
-    scan_thread_ = std::thread([this, program, cache] {
+    scan_thread_ = std::thread([this, program, cache, modules = modules_] {
         const auto started = Clock::now();
         const size_t failed = scan_dependencies(program, cache, std::max(1u, std::thread::hardware_concurrency()),
                                                 graph_, &stop_);
@@ -432,7 +432,7 @@ void Session::setup_modules() {
         if (!stop_)
             say("tracking " + plural(graph_.headers().size(), "header") + " (dependency scan took " + ms_since(started) +
                 (failed ? ", " + plural(failed, "source") + " failed to scan" : std::string()) + ")");
-        for (const auto& m : modules_) {
+        for (const auto& m : modules) { // the snapshot: modules_ may change meanwhile
             if (stop_) break;
             try {
                 m->layouts = image::dwarf_type_layouts(m->image->file());

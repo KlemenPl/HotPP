@@ -138,7 +138,7 @@ It **warns** when a struct's layout changes (a header gains a member): objects c
 
 ```bash
 ctest --test-dir build --output-on-failure   # unit + end-to-end tests (gdb optional)
-cmake -B build-asan -DHOTPP_SANITIZE=ON      # host and tests under ASan + UBSan
+cmake -B build-asan -DHOTPP_SANITIZE=ON      # host and tests under ASan + UBSan (=thread: TSan)
 ```
 
 CI (`.gitea/workflows/ci.yml`) runs the suite with GCC and Clang, Debug and Release, and under ASan/UBSan.

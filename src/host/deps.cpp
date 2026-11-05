@@ -137,10 +137,11 @@ bool cache_fresh(const fs::path& depfile, const fs::path& tu, const std::vector<
 
 size_t scan_dependencies(const std::vector<const CompileCommand*>& units, const fs::path& cache_dir, unsigned jobs,
                          DependencyGraph& graph, const std::atomic<bool>* cancel) {
-    std::error_code ec;
-    fs::create_directories(cache_dir, ec);
+    std::error_code dir_ec;
+    fs::create_directories(cache_dir, dir_ec);
     std::atomic<size_t> next{0}, failed{0};
     auto worker = [&] {
+        std::error_code ec; // per worker: they run concurrently
         for (size_t i; (i = next.fetch_add(1)) < units.size();) {
             if (cancel && *cancel) return;
             const CompileCommand& cmd = *units[i];

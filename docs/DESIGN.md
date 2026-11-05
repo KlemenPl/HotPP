@@ -490,7 +490,7 @@ Each milestone ends with a git commit, pushed to the Gitea remote, once its "don
 ## 12. Testing
 
 ### Unit tests (`tests/unit`)
-- corrupted input: a real object file and the test binary are mutated thousands of times and fed through the ELF, DWARF and linker code; they must be rejected, never crash (`HOTPP_FUZZ_ITERATIONS` scales it). With `-DHOTPP_SANITIZE=ON`, the host and the tests are built with ASan and UBSan, and the whole suite runs under them.
+- corrupted input: a real object file and the test binary are mutated thousands of times and fed through the ELF, DWARF and linker code; they must be rejected, never crash (`HOTPP_FUZZ_ITERATIONS` scales it). With `-DHOTPP_SANITIZE=ON`, the host and the tests are built with ASan and UBSan; with `=thread`, with TSan. The whole suite runs under both in CI.
 - the session state file round trip and its rejection of corrupt files
 - protocol encoding and decoding
 - region placement

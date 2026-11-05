@@ -7,7 +7,7 @@ project(HotPP
 option(HOTPP_BUILD_HOST     "Build the hotpp host executable" ON)
 option(HOTPP_BUILD_EXAMPLES "Build the examples"              ${PROJECT_IS_TOP_LEVEL})
 option(HOTPP_BUILD_TESTS    "Build the tests"                 ${PROJECT_IS_TOP_LEVEL})
-option(HOTPP_SANITIZE       "Build the host and unit tests with ASan and UBSan" OFF)
+set(HOTPP_SANITIZE OFF CACHE STRING "Sanitize the host and unit tests: OFF, ON (ASan + UBSan) or thread (TSan)")
 
 if(PROJECT_IS_TOP_LEVEL)
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -68,9 +68,12 @@ if(HOTPP_BUILD_HOST)
     target_compile_options(hotpp_host_lib PRIVATE ${HOTPP_WARNINGS})
     target_link_libraries(hotpp_host_lib PUBLIC Threads::Threads)
 
-    if(HOTPP_SANITIZE)
-        # The host parses arbitrary object files and debug info; sanitize it (and
-        # everything linking it). Programs under test stay unsanitized.
+    # The host parses arbitrary object files and debug info and runs several threads;
+    # sanitize it (and everything linking it). Programs under test stay unsanitized.
+    if(HOTPP_SANITIZE STREQUAL "thread")
+        target_compile_options(hotpp_host_lib PUBLIC -fsanitize=thread -fno-omit-frame-pointer)
+        target_link_options(hotpp_host_lib PUBLIC -fsanitize=thread)
+    elseif(HOTPP_SANITIZE)
         target_compile_options(hotpp_host_lib PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer
                                                      -fno-sanitize-recover=undefined)
         target_link_options(hotpp_host_lib PUBLIC -fsanitize=address,undefined)

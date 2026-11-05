@@ -1,5 +1,5 @@
 # Builds HotPP and runs the full test suite: {GCC, Clang} x {Debug, Release}, plus
-# the host and unit tests under ASan/UBSan.
+# the host and unit tests under ASan/UBSan and under TSan.
 name: ci
 
 on:
@@ -23,6 +23,9 @@ jobs:
           - compiler: clang
             build: Debug
             sanitize: ON
+          - compiler: clang
+            build: Debug
+            sanitize: thread
     steps:
       - name: Install tools
         run: |

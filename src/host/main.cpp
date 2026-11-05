@@ -156,6 +156,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[hotpp] error: %s\n", error.c_str());
         return 1;
     }
+    // Before any thread starts: setenv() isn't safe while other threads read the
+    // environment (starting compilers does).
+    if (run_mode) host::set_env("HOTPP_ENDPOINT", endpoint);
     Server server;
     server.options = opt.host;
     install_signal_handlers();
@@ -172,7 +175,6 @@ int main(int argc, char** argv) {
     });
 
     if (run_mode) {
-        host::set_env("HOTPP_ENDPOINT", endpoint);
         const int pid = host::spawn_child(opt.program, error);
         if (pid < 0) {
             std::fprintf(stderr, "[hotpp] error: %s\n", error.c_str());

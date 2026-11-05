@@ -95,7 +95,9 @@ private:
     std::optional<CompileDb> db_;
     std::filesystem::file_time_type db_time_{};
     void reload_compile_db_if_changed();
-    std::vector<std::unique_ptr<ModuleState>> modules_; // [0] is the executable
+    // [0] is the executable. Shared, so the scan thread can work on a snapshot while
+    // the watcher thread adds and drops modules (dlopen/dlclose).
+    std::vector<std::shared_ptr<ModuleState>> modules_;
     std::set<std::filesystem::path> units_;              // sources of all of them
     std::unordered_map<std::string, size_t> content_hash_;
     std::unique_ptr<FileWatcher> watcher_;
