@@ -1,0 +1,46 @@
+// OS layer of the agent. One implementation per platform: platform_linux.cpp, platform_win.cpp.
+#pragma once
+
+#include "common/messages.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace hotpp::agent {
+
+struct Connection;
+struct Thread;
+
+uint32_t current_pid();
+std::string executable_path();
+std::string get_env(const char* name); // empty if unset
+
+// All loaded modules; element 0 is the main executable.
+std::vector<proto::ModuleRecord> enumerate_modules();
+
+// Reserves `size` bytes of inaccessible address space within rel32 reach of `module`.
+bool reserve_near(const proto::ModuleRecord& module, uint64_t size, proto::RegionRecord& out);
+void release_region(const proto::RegionRecord& region);
+
+// Byte stream to the host. send/recv transfer exactly `size` bytes or fail.
+Connection* ipc_connect(const std::string& endpoint);
+bool ipc_send(Connection* c, const void* data, size_t size);
+bool ipc_recv(Connection* c, void* data, size_t size);
+void ipc_shutdown(Connection* c); // unblocks a pending ipc_recv on another thread
+void ipc_close(Connection* c);
+
+// Starts `program` (searched on PATH) without waiting for it.
+bool spawn_detached(const std::string& program, const std::vector<std::string>& args);
+
+Thread* thread_start(void (*fn)(void*), void* arg);
+void thread_join(Thread* t);
+void sleep_ms(unsigned ms);
+
+#if defined(__GNUC__)
+__attribute__((format(printf, 1, 2)))
+#endif
+void log(const char* fmt, ...);
+
+} // namespace hotpp::agent

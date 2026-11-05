@@ -1,0 +1,275 @@
+#include "agent/platform.h"
+#include "agent/region_select.h"
+
+#include <algorithm>
+#include <cerrno>
+#include <climits>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+
+#include <fcntl.h>
+#include <link.h>
+#include <pthread.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+#ifndef PR_SET_VMA
+#define PR_SET_VMA 0x53564d41
+#define PR_SET_VMA_ANON_NAME 0
+#endif
+
+namespace hotpp::agent {
+
+// --- process -------------------------------------------------------------------
+
+uint32_t current_pid() { return uint32_t(getpid()); }
+
+std::string executable_path() {
+    char buf[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+    return n > 0 ? std::string(buf, size_t(n)) : std::string();
+}
+
+std::string get_env(const char* name) {
+    const char* v = std::getenv(name);
+    return v ? v : "";
+}
+
+namespace {
+
+uint64_t page_size() {
+    static const uint64_t size = uint64_t(sysconf(_SC_PAGESIZE));
+    return size;
+}
+
+int collect_module(dl_phdr_info* info, size_t, void* data) {
+    auto& modules = *static_cast<std::vector<proto::ModuleRecord>*>(data);
+    uint64_t lo = UINT64_MAX, hi = 0;
+    for (int i = 0; i < info->dlpi_phnum; ++i) {
+        const ElfW(Phdr)& ph = info->dlpi_phdr[i];
+        if (ph.p_type != PT_LOAD) continue;
+        const uint64_t start = info->dlpi_addr + ph.p_vaddr;
+        lo = std::min(lo, start);
+        hi = std::max(hi, start + ph.p_memsz);
+    }
+    if (hi == 0) return 0;
+    const uint64_t page = page_size();
+    proto::ModuleRecord m;
+    m.base = info->dlpi_addr;
+    m.start = lo & ~(page - 1);
+    m.size = ((hi + page - 1) & ~(page - 1)) - m.start;
+    // dl_iterate_phdr visits the main program first, with an empty name.
+    m.path = modules.empty() ? executable_path() : (info->dlpi_name ? info->dlpi_name : "");
+    modules.push_back(std::move(m));
+    return 0;
+}
+
+// Unmapped ranges of the address space, from /proc/self/maps.
+std::vector<AddressRange> free_ranges() {
+    constexpr uint64_t kLowest = 0x10000;            // above vm.mmap_min_addr
+    constexpr uint64_t kUserTop = 0x7FFFFFFFF000ull; // 47-bit user space
+    std::vector<AddressRange> out;
+    FILE* f = std::fopen("/proc/self/maps", "re");
+    if (!f) return out;
+    char* line = nullptr;
+    size_t cap = 0;
+    uint64_t prev_end = kLowest;
+    while (getline(&line, &cap, f) > 0) {
+        unsigned long long start = 0, end = 0;
+        if (std::sscanf(line, "%llx-%llx", &start, &end) != 2) continue;
+        if (start > prev_end) out.push_back({prev_end, std::min<uint64_t>(start, kUserTop)});
+        prev_end = std::max<uint64_t>(prev_end, end);
+    }
+    if (prev_end < kUserTop) out.push_back({prev_end, kUserTop});
+    std::free(line);
+    std::fclose(f);
+    return out;
+}
+
+} // namespace
+
+std::vector<proto::ModuleRecord> enumerate_modules() {
+    std::vector<proto::ModuleRecord> modules;
+    dl_iterate_phdr(collect_module, &modules);
+    return modules;
+}
+
+bool reserve_near(const proto::ModuleRecord& module, uint64_t size, proto::RegionRecord& out) {
+    constexpr uint64_t kAlignment = 64 * 1024;
+    constexpr uint64_t kAboveGuard = uint64_t(64) << 20; // room for the brk heap
+    const std::vector<uint64_t> candidates = near_region_candidates(
+        free_ranges(), module.start, module.start + module.size, size, kAlignment, kAboveGuard);
+    for (uint64_t addr : candidates) {
+        void* p = mmap(reinterpret_cast<void*>(addr), size, PROT_NONE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+        if (p == MAP_FAILED) continue;
+        if (reinterpret_cast<uint64_t>(p) != addr) {
+            munmap(p, size); // kernel < 4.17 treated the address as a hint
+            continue;
+        }
+        // Shows up as [anon:hotpp-patch-region] in /proc/<pid>/maps where supported.
+        prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, reinterpret_cast<unsigned long>(p),
+              static_cast<unsigned long>(size),
+              reinterpret_cast<unsigned long>("hotpp-patch-region"));
+        out.base = addr;
+        out.size = size;
+        return true;
+    }
+    return false;
+}
+
+void release_region(const proto::RegionRecord& region) {
+    munmap(reinterpret_cast<void*>(region.base), region.size);
+}
+
+// --- IPC: Unix domain socket ---------------------------------------------------------
+
+struct Connection {
+    int fd;
+};
+
+Connection* ipc_connect(const std::string& endpoint) {
+    sockaddr_un addr{};
+    if (endpoint.empty() || endpoint.size() >= sizeof addr.sun_path) return nullptr;
+    addr.sun_family = AF_UNIX;
+    std::memcpy(addr.sun_path, endpoint.data(), endpoint.size());
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return nullptr;
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) {
+        close(fd);
+        return nullptr;
+    }
+    return new Connection{fd};
+}
+
+bool ipc_send(Connection* c, const void* data, size_t size) {
+    const char* p = static_cast<const char*>(data);
+    while (size > 0) {
+        ssize_t n = send(c->fd, p, size, MSG_NOSIGNAL);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        p += n;
+        size -= size_t(n);
+    }
+    return true;
+}
+
+bool ipc_recv(Connection* c, void* data, size_t size) {
+    char* p = static_cast<char*>(data);
+    while (size > 0) {
+        ssize_t n = recv(c->fd, p, size, 0);
+        if (n == 0) return false;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        p += n;
+        size -= size_t(n);
+    }
+    return true;
+}
+
+void ipc_shutdown(Connection* c) { shutdown(c->fd, SHUT_RDWR); }
+
+void ipc_close(Connection* c) {
+    close(c->fd);
+    delete c;
+}
+
+// --- processes and threads ---------------------------------------------------------
+
+bool spawn_detached(const std::string& program, const std::vector<std::string>& args) {
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(program.c_str()));
+    for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+
+    // The grandchild reports an exec failure through this pipe; a successful exec
+    // closes it (O_CLOEXEC) and the read below sees EOF.
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) != 0) return false;
+
+    pid_t child = fork();
+    if (child < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return false;
+    }
+    if (child == 0) {
+        // Double fork: the host is re-parented to init and never becomes our zombie.
+        setsid();
+        pid_t grandchild = fork();
+        if (grandchild != 0) _exit(grandchild < 0 ? 1 : 0);
+        execvp(argv[0], argv.data());
+        int err = errno;
+        ssize_t ignored = write(fds[1], &err, sizeof err);
+        (void)ignored;
+        _exit(127);
+    }
+    close(fds[1]);
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
+    }
+    int err = 0;
+    ssize_t n;
+    do {
+        n = read(fds[0], &err, sizeof err);
+    } while (n < 0 && errno == EINTR);
+    close(fds[0]);
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 && n == 0;
+}
+
+struct Thread {
+    pthread_t handle;
+    void (*fn)(void*);
+    void* arg;
+};
+
+namespace {
+void* thread_trampoline(void* p) {
+    auto* t = static_cast<Thread*>(p);
+    t->fn(t->arg);
+    return nullptr;
+}
+} // namespace
+
+Thread* thread_start(void (*fn)(void*), void* arg) {
+    auto* t = new Thread{{}, fn, arg};
+    // The agent thread blocks all signals so the app's own signal handling is unaffected.
+    sigset_t all, old;
+    sigfillset(&all);
+    pthread_sigmask(SIG_SETMASK, &all, &old);
+    int rc = pthread_create(&t->handle, nullptr, thread_trampoline, t);
+    pthread_sigmask(SIG_SETMASK, &old, nullptr);
+    if (rc != 0) {
+        delete t;
+        return nullptr;
+    }
+    pthread_setname_np(t->handle, "hotpp-agent");
+    return t;
+}
+
+void thread_join(Thread* t) {
+    pthread_join(t->handle, nullptr);
+    delete t;
+}
+
+void sleep_ms(unsigned ms) {
+    timespec ts{time_t(ms / 1000), long(ms % 1000) * 1000000L};
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
+}
+
+} // namespace hotpp::agent

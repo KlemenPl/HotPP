@@ -1,0 +1,5 @@
+/build*/
+/out/
+.hotpp/
+.cache/
+compile_commands.json
