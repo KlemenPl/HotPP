@@ -1,0 +1,20 @@
+{
+  "gdb": "gdb_script.py",
+  "steps": [
+    {
+      "name": "change value() while gdb is attached",
+      "copy": {
+        "game.cpp": "v2/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied"
+    }
+  ],
+  "settle_frames": 0,
+  "expect_output": [
+    "^GDB-STOP value\\S* \\S*game\\.cpp:5 objfile=<in-memory",
+    "^GDB-VARS .* ok$",
+    "^GDB-BT ok",
+    "^GDB-FINISH case_frame",
+    "^GDB-DONE"
+  ]
+}

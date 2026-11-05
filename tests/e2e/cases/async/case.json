@@ -1,0 +1,14 @@
+{
+  "env": {
+    "HOTPP_ASYNC": "1"
+  },
+  "steps": [
+    {
+      "name": "patch while main spins",
+      "copy": {
+        "game.cpp": "v2/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied"
+    }
+  ]
+}

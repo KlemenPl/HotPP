@@ -15,3 +15,6 @@ void update() {
 int fresh() { return 42; }
 
 int (*value_pointer())() { return &value; }
+
+static int helper() { return 3; }
+int (*helper_pointer())() { return &helper; } // GCC takes this address via the section symbol

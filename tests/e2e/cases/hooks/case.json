@@ -1,0 +1,18 @@
+{
+  "steps": [
+    {
+      "name": "patch with hooks",
+      "copy": {
+        "game.cpp": "v2/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied"
+    },
+    {
+      "name": "change a hook and add one",
+      "copy": {
+        "game.cpp": "v3/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 2 applied"
+    }
+  ]
+}

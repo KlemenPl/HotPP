@@ -5,6 +5,7 @@
 #include "common/messages.h"
 #include "host/compile_db.h"
 #include "host/deps.h"
+#include "host/image/dwarf_types.h"
 #include "host/image/elf_image.h"
 #include "host/link/symbol_index.h"
 #include "host/platform.h"
@@ -19,6 +20,10 @@
 #include <set>
 #include <thread>
 #include <unordered_map>
+
+namespace hotpp::link {
+struct LinkResult;
+}
 
 namespace hotpp::host {
 
@@ -49,6 +54,7 @@ private:
     void watch_headers();
     bool changed(const std::filesystem::path& file); // content differs from the last time we looked
     void handle_changes(const std::vector<std::filesystem::path>& files);
+    void warn_layout_changes(const link::LinkResult& linked);
     std::vector<uint64_t> resolve_external(const std::vector<std::string>& names);
     std::optional<proto::PatchResult> wait_for_result(uint32_t id);
     void say(const std::string& line) const;
@@ -72,6 +78,11 @@ private:
     std::mutex scan_mutex_;
     std::condition_variable scan_cv_;
     std::atomic<bool> scan_done_{false};
+    // Struct layouts of the running program, read after the dependency scan.
+    std::unordered_map<std::string, image::TypeLayout> layouts_;
+    std::unordered_map<std::string, image::TypeLayout> pending_layouts_; // adopted once a patch applies
+    bool layouts_ok_ = false;
+    std::atomic<bool> layouts_ready_{false};
     std::filesystem::path patch_dir_;
     uint64_t region_cursor_ = 0;
     uint64_t region_end_ = 0;

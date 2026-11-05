@@ -7,6 +7,7 @@
 #include "common/endpoint.h"
 #include "common/messages.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
@@ -43,6 +44,8 @@ struct AgentState {
     std::atomic<bool> connected{false};
     bool initialized = false;
 
+    bool async = false; // apply patches on the agent thread as they arrive
+
     std::mutex queue_mutex;
     std::vector<Patch> pending; // received, waiting for sync_point()
     std::atomic<bool> has_pending{false};
@@ -51,6 +54,33 @@ struct AgentState {
 AgentState& state() {
     static AgentState s;
     return s;
+}
+
+// Hooks register during static initialization, possibly before init().
+struct HookRegistry {
+    std::mutex mutex;
+    std::vector<void (*)()> pre, post;
+};
+
+HookRegistry& hooks() {
+    static HookRegistry h;
+    return h;
+}
+
+void run_hooks(detail::HookKind kind) {
+    std::vector<void (*)()> fns;
+    {
+        HookRegistry& h = hooks();
+        std::lock_guard<std::mutex> lock(h.mutex);
+        fns = kind == detail::HookKind::PrePatch ? h.pre : h.post;
+    }
+    for (void (*fn)() : fns) {
+        try {
+            fn();
+        } catch (...) {
+            agent::log("a %s-patch hook threw; ignored", kind == detail::HookKind::PrePatch ? "pre" : "post");
+        }
+    }
 }
 
 bool send_message(AgentState& s, MsgType type, const Writer& w) {
@@ -78,6 +108,20 @@ bool recv_message(AgentState& s, Header& h, std::vector<uint8_t>& payload) {
     return h.size == 0 || agent::ipc_recv(s.conn, payload.data(), h.size);
 }
 
+void apply_and_report(const Patch& patch) {
+    AgentState& s = state();
+    run_hooks(detail::HookKind::PrePatch);
+    PatchResult result;
+    result.id = patch.id;
+    result.error = agent::apply_patch(patch, s.regions, s.main_module);
+    result.ok = result.error.empty();
+    if (result.ok) run_hooks(detail::HookKind::PostPatch);
+    else agent::log("patch %u failed: %s", unsigned(patch.id), result.error.c_str());
+    Writer w;
+    encode(w, result);
+    if (s.connected) send_message(s, MsgType::PatchResult, w);
+}
+
 void reader_main(void*) {
     agent::mark_agent_thread();
     AgentState& s = state();
@@ -93,6 +137,10 @@ void reader_main(void*) {
             Patch patch;
             if (!decode(r, patch)) {
                 agent::log("malformed patch from host; ignored");
+                continue;
+            }
+            if (s.async) {
+                apply_and_report(patch);
                 continue;
             }
             std::lock_guard<std::mutex> lock(s.queue_mutex);
@@ -166,6 +214,7 @@ bool init(const Config& cfg) {
     s.initialized = true;
 
     if (agent::get_env("HOTPP_DISABLE") == "1") return false;
+    s.async = cfg.async || agent::get_env("HOTPP_ASYNC") == "1";
 
     Hello hello;
     hello.pid = agent::current_pid();
@@ -227,8 +276,8 @@ bool init(const Config& cfg) {
         release_all(s);
         return false;
     }
-    agent::log("connected to hotpp %s (pid %u) on %s", ack.host_version.c_str(),
-               unsigned(ack.host_pid), endpoint.c_str());
+    agent::log("connected to hotpp %s (pid %u) on %s%s", ack.host_version.c_str(), unsigned(ack.host_pid),
+               endpoint.c_str(), s.async ? ", async mode" : "");
     return true;
 }
 
@@ -241,17 +290,19 @@ void sync_point() {
         todo.swap(s.pending);
         s.has_pending = false;
     }
-    for (const Patch& patch : todo) {
-        PatchResult result;
-        result.id = patch.id;
-        result.error = agent::apply_patch(patch, s.regions, s.main_module);
-        result.ok = result.error.empty();
-        if (!result.ok) agent::log("patch %u failed: %s", unsigned(patch.id), result.error.c_str());
-        Writer w;
-        encode(w, result);
-        if (s.connected) send_message(s, MsgType::PatchResult, w);
-    }
+    for (const Patch& patch : todo) apply_and_report(patch);
 }
+
+namespace detail {
+void register_hook(HookKind kind, void (*fn)()) {
+    if (!fn) return;
+    HookRegistry& h = hooks();
+    std::lock_guard<std::mutex> lock(h.mutex);
+    auto& list = kind == HookKind::PrePatch ? h.pre : h.post;
+    // A patch can re-run a file's initializers (docs/DESIGN.md §8.6); register once.
+    if (std::find(list.begin(), list.end(), fn) == list.end()) list.push_back(fn);
+}
+} // namespace detail
 
 void shutdown() {
     AgentState& s = state();

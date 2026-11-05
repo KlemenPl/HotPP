@@ -15,6 +15,7 @@ constexpr uint64_t kCounter = 0x10000000;   // old `counter`
 constexpr uint64_t kTicks = 0x10000010;     // old `ticks` (file-local)
 constexpr uint64_t kValue = 0x10001005;     // old value()
 constexpr uint64_t kUpdate = 0x10002005;    // old update()
+constexpr uint64_t kHelper = 0x10003005;    // old static helper()
 constexpr uint64_t kPrintf = 0x7f00deadb000; // printf in a shared library
 constexpr uint64_t kRegion = 0x20000000;
 
@@ -48,6 +49,7 @@ struct Fixture {
         index.add({true, obj->source_name, "_ZL5ticks"}, data(kTicks));
         index.add({false, "", "_Z5valuev"}, function(kValue));
         index.add({false, "", "_Z6updatev"}, function(kUpdate));
+        index.add({true, obj->source_name, "_ZL6helperv"}, function(kHelper));
         LinkOptions opt;
         opt.region_cursor = kRegion;
         opt.region_end = kRegion + (16 << 20);
@@ -123,13 +125,14 @@ HOTPP_TEST(linker_keeps_existing_variables) {
 
 HOTPP_TEST(linker_redirects_existing_functions) {
     Fixture f;
-    CHECK(f.result.functions_redirected == 2);
-    CHECK(f.result.functions_new == 2); // fresh(), value_pointer()
-    CHECK(f.result.patch.sites.size() == 2);
+    CHECK(f.result.functions_redirected == 3);
+    CHECK(f.result.functions_new == 3); // fresh(), value_pointer(), helper_pointer()
+    CHECK(f.result.patch.sites.size() == 3);
     for (const auto& site : f.result.patch.sites) {
         CHECK(site.pad_addr == site.entry_addr - 5);
         CHECK(site.entry_bytes[0] == 0xEB && site.entry_bytes[1] == 0xF9);
         if (site.entry_addr == kValue) CHECK(site.target == f.new_entry("_Z5valuev"));
+        else if (site.entry_addr == kHelper) CHECK(site.target == f.new_entry("_ZL6helperv"));
         else CHECK(site.entry_addr == kUpdate && site.target == f.new_entry("_Z6updatev"));
     }
     // The new copies are padded too, so a later patch can redirect them again.
@@ -184,4 +187,22 @@ HOTPP_TEST(linker_rejects_resized_variables) {
         restart = true;
     }
     CHECK(restart);
+}
+
+HOTPP_TEST(linker_canonicalizes_static_function_addresses) {
+    // &helper (a static function) must be its original address too, even when the
+    // compiler refers to it through its section symbol.
+    Fixture f;
+    bool found = false;
+    for (const auto& [name, target] : f.rel32_targets("_Z14helper_pointerv")) {
+        if (name != "_ZL6helperv" && name != ".text._ZL6helperv") continue;
+        found = true;
+        const uint8_t* slot = f.at(target, 8);
+        uint64_t via_got = 0;
+        if (slot) std::memcpy(&via_got, slot, 8);
+        // rel32_targets subtracts the addend; a section-symbol lea's addend points 5 bytes in.
+        const bool direct = target == kHelper || target + 5 == kHelper;
+        CHECK(direct || via_got == kHelper);
+    }
+    CHECK(found);
 }

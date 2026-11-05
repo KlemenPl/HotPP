@@ -33,6 +33,8 @@ struct LinkOptions {
     // Size of the executable's static TLS block (PT_TLS memsz rounded up to its
     // alignment); thread-pointer offsets are symbol value minus this. 0: no TLS.
     uint64_t tls_block_size = 0;
+    // Also produce debugger objects (docs/DESIGN.md §9).
+    bool debug_objects = true;
 };
 
 struct LinkResult {

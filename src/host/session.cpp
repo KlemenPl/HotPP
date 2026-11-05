@@ -1,6 +1,7 @@
 #include "host/session.h"
 
 #include "host/deps.h"
+#include "host/image/dwarf_types.h"
 #include "host/link/linker.h"
 #include "host/object/elf_object.h"
 
@@ -11,6 +12,8 @@
 #include <fstream>
 #include <functional>
 #include <sstream>
+
+#include <unistd.h>
 
 namespace hotpp::host {
 
@@ -44,15 +47,31 @@ const char* arch_name(Arch a) { return a == Arch::X64 ? "x64" : "unknown-arch"; 
 
 uint64_t distance(uint64_t a, uint64_t b) { return a > b ? a - b : b - a; }
 
-// Prints what the agent reported. Returns false if it can't be patched: no region,
-// or a region outside rel32 reach of its module.
-bool print_hello(const Hello& h) {
+// Prints what the agent reported: one line, or everything with --verbose. Returns
+// false if it can't be patched: no region, or a region outside rel32 reach.
+bool print_hello(const Hello& h, bool verbose) {
     std::string out;
     char line[1024];
     auto add = [&](const char* fmt, auto... args) {
         std::snprintf(line, sizeof line, fmt, args...);
         out += line;
     };
+    bool ok = !h.regions.empty();
+    for (const RegionRecord& r : h.regions) {
+        if (r.module_index >= h.modules.size()) {
+            ok = false;
+            continue;
+        }
+        const ModuleRecord& m = h.modules[r.module_index];
+        ok = ok && std::max(distance(r.base, m.start + m.size), distance(r.base + r.size, m.start)) < (uint64_t(1) << 31);
+    }
+    if (!verbose && ok) {
+        add("[hotpp] agent connected: pid %u, %s (%s patch region)\n", unsigned(h.pid),
+            fs::path(h.exe).filename().c_str(), format_size(h.regions[0].size).c_str());
+        std::fputs(out.c_str(), stdout);
+        std::fflush(stdout);
+        return ok;
+    }
     add("[hotpp] agent connected: pid %u (%s %s)\n", unsigned(h.pid), platform_name(h.platform),
         arch_name(h.arch));
     add("  exe:              %s\n", h.exe.c_str());
@@ -64,18 +83,15 @@ bool print_hello(const Hello& h) {
             (unsigned long long)(m.start + m.size), format_size(m.size).c_str(),
             m.path.empty() ? "(unnamed)" : m.path.c_str());
     }
-    bool ok = !h.regions.empty();
     add("  patch regions (%zu):\n", h.regions.size());
     for (const RegionRecord& r : h.regions) {
         if (r.module_index >= h.modules.size()) {
             add("    %016llx  invalid module index %u\n", (unsigned long long)r.base, unsigned(r.module_index));
-            ok = false;
             continue;
         }
         const ModuleRecord& m = h.modules[r.module_index];
         const uint64_t farthest = std::max(distance(r.base, m.start + m.size), distance(r.base + r.size, m.start));
         const bool in_reach = farthest < (uint64_t(1) << 31);
-        ok = ok && in_reach;
         add("    %016llx-%016llx %10s  near [%u], farthest byte %s away%s\n", (unsigned long long)r.base,
             (unsigned long long)(r.base + r.size), format_size(r.size).c_str(), unsigned(r.module_index),
             format_size(farthest).c_str(), in_reach ? "" : "  OUT OF RANGE");
@@ -123,8 +139,47 @@ Session::~Session() {
 }
 
 void Session::say(const std::string& line) const {
-    std::printf("[hotpp] %s\n", line.c_str());
+    // Colors only on a terminal (and not with NO_COLOR): green for applied patches,
+    // red for patches not applied, yellow for warnings and notes.
+    static const bool color = isatty(STDOUT_FILENO) && !std::getenv("NO_COLOR");
+    const char* c = nullptr;
+    if (color) {
+        if (line.rfind("warning:", 0) == 0 || line.rfind("note:", 0) == 0) c = "\033[33m";
+        else if (line.find(" not applied") != std::string::npos || line.find(" failed") != std::string::npos) c = "\033[31m";
+        else if (line.rfind("patch ", 0) == 0 && line.find(" applied") != std::string::npos) c = "\033[32m";
+    }
+    if (c) std::printf("[hotpp] %s%s\033[0m\n", c, line.c_str());
+    else std::printf("[hotpp] %s\n", line.c_str());
     std::fflush(stdout);
+}
+
+// Structs whose layout in the patch differs from the running program's: objects
+// created before the patch keep the old layout, which the new code would misread.
+void Session::warn_layout_changes(const link::LinkResult& linked) {
+    {
+        std::unique_lock<std::mutex> lock(scan_mutex_);
+        scan_cv_.wait(lock, [&] { return layouts_ready_ || stop_.load(); });
+    }
+    if (!layouts_ok_) return;
+    std::set<std::string> reported;
+    for (const auto& object : linked.patch.debug_objects) {
+        std::unordered_map<std::string, image::TypeLayout> mine;
+        try {
+            mine = image::dwarf_type_layouts(elf::ElfFile::from_bytes(object, "patch object"));
+        } catch (const std::exception&) {
+            continue;
+        }
+        for (auto& [name, layout] : mine) {
+            auto old = layouts_.find(name);
+            if (old == layouts_.end() || old->second == layout || !reported.insert(name).second) continue;
+            std::string what = old->second.size != layout.size
+                                   ? std::to_string(old->second.size) + " -> " + std::to_string(layout.size) + " bytes"
+                                   : "members moved";
+            say("warning: layout of " + name + " changed (" + what +
+                "); objects created before this patch still have the old layout, restart if any are in use");
+            pending_layouts_[name] = layout;
+        }
+    }
 }
 
 bool Session::send(MsgType type, const Writer& w) {
@@ -165,7 +220,7 @@ Session::Outcome Session::run() {
         return outcome;
     }
     outcome.hello = true;
-    outcome.layout_ok = print_hello(hello_);
+    outcome.layout_ok = print_hello(hello_, options_.verbose);
     exe_name_ = fs::path(hello_.exe).filename().string();
 
     HelloAck ack;
@@ -268,6 +323,18 @@ void Session::start_hot_reload() {
         {
             std::lock_guard<std::mutex> lock(scan_mutex_);
             scan_done_ = true;
+        }
+        scan_cv_.notify_all();
+        // Struct layouts of the running program, for layout-change warnings.
+        try {
+            layouts_ = image::dwarf_type_layouts(image_->file());
+            layouts_ok_ = true;
+        } catch (const std::exception& e) {
+            if (!stop_) say("warning: can't read struct layouts (" + std::string(e.what()) + "); no layout warnings");
+        }
+        {
+            std::lock_guard<std::mutex> lock(scan_mutex_);
+            layouts_ready_ = true;
         }
         scan_cv_.notify_all();
         if (!stop_)
@@ -424,6 +491,8 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
     if (options_.verbose)
         for (const std::string& line : linked.log) say("  " + line);
     for (const std::string& note : linked.notes) say("note: " + note);
+    pending_layouts_.clear();
+    warn_layout_changes(linked);
 
     linked.patch.id = id;
     Writer w;
@@ -438,6 +507,7 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
         return;
     }
     index_.apply(linked.delta);
+    for (auto& [name, layout] : pending_layouts_) layouts_[name] = layout; // warn once per change
     std::string summary = plural(linked.functions_redirected, "function") + " replaced, " +
                           std::to_string(linked.functions_new) + " new, " + plural(linked.data_kept, "variable") +
                           " kept";

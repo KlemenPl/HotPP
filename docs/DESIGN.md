@@ -1,6 +1,6 @@
 # HotPP — Design
 
-Status: M0, M1 and M3 implemented; M2 (Windows) dropped; M4 in progress · Last updated: 2026-11-05
+Status: M0, M1, M3 and M4 implemented; M2 (Windows) dropped · Last updated: 2026-11-05
 
 HotPP is a hot-reload tool for C++ on Linux (x86-64, GCC and Clang). You edit a `.cpp` file or a header, save it, and the running program picks up the new code, typically within a fraction of a second. It doesn't restart and doesn't lose state.
 
@@ -252,7 +252,7 @@ GCC creates internal clones (`foo.constprop.0`, `foo.isra.0`, `foo.part.0`, `foo
 
 ### 8.1 Modes
 - **Sync-point mode (default).** The agent thread receives the patch and queues it. The patch applies inside the next `hotpp::sync_point()` call, typically at the top of the main loop.
-- **Async mode (M4,** `Config::async = true`**).** The agent thread applies the patch as soon as it arrives. This suits programs without a natural loop.
+- **Async mode** (`Config::async = true` or `$HOTPP_ASYNC=1`). The agent thread applies the patch as soon as it arrives, even while the main thread is busy in a loop that never reaches `sync_point()`. This suits programs without a natural loop. Thread pausing (step 5) protects the patch sites exactly as in sync-point mode.
 
 Either way, other threads are paused only while the patch sites are written (§8.2).
 
@@ -297,12 +297,14 @@ A patch TU contains dynamic initializers for its globals (`.init_array`). Runnin
 
 GCC folds all of a file's initializers into one function, and Clang calls them all from one entry. So adding one dynamically initialized global re-runs the initializers of the file's other globals, into scratch copies, and their side effects (registration, I/O) happen again. The host prints a note when that happens.
 
-### 8.7 Hooks (M4)
+The converse also holds: an initializer that writes *no* new variable is skipped, even if it has side effects. One example is an empty registrar object that the optimizer removed, leaving only a call. Code that should register something when a patch adds it needs a variable for the registration to write. The hook macros (§8.7) do this.
+
+### 8.7 Hooks
 ```cpp
 HOTPP_PRE_PATCH(on_before_patch);   // before a patch is applied
 HOTPP_POST_PATCH(on_after_patch);   // after it is live
 ```
-- Each macro defines a static registrar object whose constructor registers the function with the agent.
+- Each macro defines a static registrar object (`[[gnu::used]]`, storing the function pointer) whose constructor registers the function with the agent. Because the registrar is a real variable, a patch that adds a hook runs its initializer (§8.6).
 - Hooks run on the thread that applies the patch (the `sync_point()` caller, or the agent thread in async mode).
 - Registration composes with patching on its own:
   - A hook added by a patch is a new variable, so its initializer runs and registers it.
@@ -312,7 +314,7 @@ HOTPP_POST_PATCH(on_after_patch);   // after it is live
 
 ---
 
-## 9. Debugger support (M4)
+## 9. Debugger support
 
 Patched code is registered with gdb's JIT interface. The agent defines `__jit_debug_descriptor` and `__jit_debug_register_code` (weak, so they merge with another JIT's definitions in the same process).
 
@@ -326,7 +328,17 @@ After the patch is live, the agent registers each debug object. gdb then has ful
 - `step`, `bt` and `print` work in it
 - variables kept from the old program show their real (old) storage
 
-Old and new versions of a function both stay known to gdb, which treats them as separate locations of the same breakpoint.
+Old and new versions of a function both stay known to gdb, which treats them as separate locations of the same breakpoint. Only the newest is ever reached: the old body sits behind the jump at its entry.
+
+The `gdb_step` e2e case checks this: under gdb, with the patch live, it
+- breaks at a `file:line` that exists only in the new code (gdb reports an `<in-memory@…>` objfile)
+- reads a local and a kept global, whose value matches the program's
+- takes a backtrace from new code into old
+- runs `finish` back into old code
+
+At `-O2` the local is optimized out, as in any optimized build.
+
+**gdb and thread pausing.** Pausing other threads (§8.2) uses a real-time signal: the first free one from `SIGRTMIN+4`, usually `SIG38`. gdb stops on such signals by default. When debugging a multithreaded program while patching, tell gdb to pass it through: `handle SIG38 nostop noprint pass`.
 
 ---
 
@@ -338,8 +350,9 @@ HotPP/
 ├── include/hotpp/hotpp.h                 # public agent API
 ├── src/common/                           # protocol.h, messages.h, endpoint.h
 ├── src/agent/                            # static library linked into the app
-│   ├── agent.cpp                         # init, IPC thread, sync_point, hooks
+│   ├── agent.cpp                         # init, IPC thread, sync_point, async mode, hooks
 │   ├── patcher.cpp                       # validate, map, initializers, sites
+│   ├── jit_debug.cpp                     # gdb JIT interface
 │   ├── platform_linux.cpp                # modules, region, memory, IPC, processes
 │   ├── threads_linux.cpp                 # thread pausing, unwind registration, membarrier
 │   └── region_select.cpp                 # where the region goes (pure, unit tested)
@@ -348,7 +361,8 @@ HotPP/
 │   ├── compile_db.cpp, deps.cpp          # compile_commands.json, dependency graph
 │   ├── watcher_linux.cpp, platform_linux.cpp
 │   ├── elf/elf_file.cpp                  # bounds-checked ELF reading
-│   ├── image/elf_image.cpp, dwarf.cpp    # executable symtab, DWARF
+│   ├── image/elf_image.cpp               # executable symtab, TLS layout, build ID
+│   ├── image/dwarf_reader.cpp, dwarf.cpp # DWARF: compile units, struct layouts
 │   ├── object/elf_object.cpp             # relocatable objects
 │   ├── link/linker.cpp, symbol_index.cpp, patch_site.cpp
 │   └── util/json.cpp
@@ -372,8 +386,8 @@ void sync_point();                // apply pending patches
 void shutdown();
 bool connected();
 }
-#define HOTPP_PRE_PATCH(fn)  // M4
-#define HOTPP_POST_PATCH(fn) // M4
+#define HOTPP_PRE_PATCH(fn)  // void fn(), before each patch
+#define HOTPP_POST_PATCH(fn) // void fn(), after each patch is live
 ```
 Defining `HOTPP_DISABLE` turns the whole API into inline no-ops.
 
@@ -387,13 +401,14 @@ Defining `HOTPP_DISABLE` turns the whole API into inline no-ops.
 | **M1** | Live patching: compile DB, `.cpp` edits, ELF object loader, symbol index, binding policy, stubs and GOT, patch sites, sync-point mode | Editing a function body in the sample changes behaviour live while a global counter keeps counting. | done |
 | **M2** | Windows (MSVC, COFF/PDB) | — | dropped |
 | **M3** | Correctness: header edits, several TUs per patch, repeated patches, initializers, local statics, existing TLS, exceptions and RTTI across patches, thread pausing, restart-required checks | The e2e suite (§12) passes with GCC and Clang at `-O0` and `-O2`. | done |
-| **M4** | Usability: gdb JIT debug info, hooks, async mode, layout-change warnings, quieter console output | You can step through patched code in gdb (automated test). | in progress |
+| **M4** | Usability: gdb JIT debug info, hooks, async mode, layout-change warnings, quieter console output | You can step through patched code in gdb (automated test). | done |
 | **M5** | Extended: patching shared libraries, hot restart, injecting into an app without the agent | Scoped separately. | — |
 
 Each milestone ends with a git commit, pushed to the Gitea remote, once its "done when" condition is met.
 
 **Known limits:**
-- Struct layout changes that live objects use are only warned about (M4), never fixed up.
+- Struct layout changes that live objects use are only warned about, never fixed up.
+- An initializer that registers something without writing a new variable is skipped when a patch adds it (§8.6); the hook macros don't have this problem.
 - Adding a dynamically initialized global re-runs the initializers of the file's other globals into scratch copies, repeating their side effects (§8.6).
 - New `thread_local` variables, resized or retyped globals, and new direct references to shared-library variables need a restart.
 - `__attribute__((destructor))` functions in a patch aren't registered.
@@ -411,7 +426,8 @@ Each milestone ends with a git commit, pushed to the Gitea remote, once its "don
 - the dependency graph
 - patch-site analysis (GCC, Clang and CET padding)
 - ELF image and object parsing against the test binary itself
-- the linker, run against a real object file compiled like a patch, with a hand-made index (bindings, stubs, canonical addresses, resize rejection)
+- the linker, run against a real object file compiled like a patch, with a hand-made index: bindings, stubs, canonical addresses (including `static` functions referenced through their section symbol), resize rejection
+- struct layouts read from the test binary's own DWARF
 
 ### End-to-end cases (`tests/e2e`)
 Each case is a directory `tests/e2e/cases/<case>/` with:
@@ -440,8 +456,12 @@ The program checks its invariants every frame (state never resets, old and new r
 | `tls` | Existing `thread_local` variables keep their values on the main thread and on a second thread. |
 | `restart_required` | A resized global and a new `thread_local` are rejected without touching the program; a valid change afterwards applies. |
 | `compile_error` | A broken edit applies nothing; the fix applies afterwards. |
+| `hooks` | Pre/post-patch hooks run exactly once per patch; a changed hook body takes effect; a hook added by a patch is registered and runs. |
+| `async` | In async mode, a patch applies while the main thread spins in a loop that never reaches `sync_point()`. |
+| `layout_warning` | A struct that grows in a header triggers the layout warning, and the patch still applies. |
+| `gdb_step` | Under gdb: a breakpoint in new code, locals and kept globals, a backtrace into old code, `finish` (§9). Runs only if gdb is installed. |
 
-**Matrix:** {GCC, Clang} × {Debug (`-O0`), Release (`-O2`)}, in four build directories.
+**Matrix:** {GCC, Clang} × {Debug (`-O0`), Release (`-O2`)}, in four build directories. With gdb mode, `case.json` can also run the program under gdb (`"gdb": "<script>"`, `"expect_output": [...]`). `"env"` sets environment variables, and a step's `"expect"` may list several lines in order.
 
 ---
 

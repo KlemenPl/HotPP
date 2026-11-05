@@ -14,14 +14,15 @@ namespace hotpp {
 struct Config {
     // Path to compile_commands.json. Overridden by $HOTPP_COMPILE_COMMANDS.
     const char* compile_commands = HOTPP_DEFAULT_COMPILE_COMMANDS;
-    // Host endpoint (Unix socket path / named pipe name). Default: $HOTPP_ENDPOINT,
-    // then $XDG_RUNTIME_DIR/hotpp.sock (or /tmp/hotpp-<uid>.sock).
+    // Host endpoint (Unix socket path). Default: $HOTPP_ENDPOINT, then
+    // $XDG_RUNTIME_DIR/hotpp.sock (or /tmp/hotpp-<uid>.sock).
     const char* endpoint = nullptr;
     // Host executable to launch when none is listening. Default: $HOTPP_HOST, then "hotpp" on PATH.
     const char* host_path = nullptr;
     // Launch the host if none is listening. $HOTPP_LAUNCH_HOST=0 turns this off.
     bool launch_host = true;
-    // Apply patches as soon as they arrive instead of at sync_point(). (Not implemented yet.)
+    // Apply patches on the agent thread as soon as they arrive, instead of in
+    // sync_point(). For programs without a main loop. $HOTPP_ASYNC=1 turns it on.
     bool async = false;
     // Address space reserved next to the executable for patch code.
     std::size_t region_size = std::size_t(512) << 20;
@@ -45,4 +46,40 @@ void shutdown();
 bool connected();
 #endif
 
+namespace detail {
+enum class HookKind { PrePatch, PostPatch };
+#if !defined(HOTPP_DISABLE)
+void register_hook(HookKind kind, void (*fn)());
+#endif
+// Stores the hook so the registering initializer writes a variable of its own: a
+// patch runs a file's initializers only when they set up new variables
+// (docs/DESIGN.md §8.6), and an empty registrar would be optimized away.
+struct HookRegistrar {
+    void (*fn)();
+    HookRegistrar(HookKind kind, void (*f)()) : fn(f) {
+#if !defined(HOTPP_DISABLE)
+        register_hook(kind, f);
+#else
+        (void)kind;
+#endif
+    }
+};
+} // namespace detail
+
 } // namespace hotpp
+
+#define HOTPP_CONCAT_(a, b) a##b
+#define HOTPP_CONCAT(a, b) HOTPP_CONCAT_(a, b)
+
+// Registers `void fn()` to run right before every patch is applied, on the thread
+// that applies it (the sync_point() caller, or the agent thread in async mode).
+// Use at namespace scope. A hook added or changed by a patch takes effect with it.
+#define HOTPP_PRE_PATCH(fn)                                                         \
+    [[gnu::used]] static ::hotpp::detail::HookRegistrar HOTPP_CONCAT(hotpp_hook_, __COUNTER__)( \
+        ::hotpp::detail::HookKind::PrePatch, fn)
+
+// Registers `void fn()` to run right after every patch is live: rebuild caches,
+// re-read data, re-register callbacks.
+#define HOTPP_POST_PATCH(fn)                                                        \
+    [[gnu::used]] static ::hotpp::detail::HookRegistrar HOTPP_CONCAT(hotpp_hook_, __COUNTER__)( \
+        ::hotpp::detail::HookKind::PostPatch, fn)

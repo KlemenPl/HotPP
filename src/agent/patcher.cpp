@@ -107,7 +107,10 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
     //    being rewritten: long jump into the padding first, then the 2-byte short jump
     //    at the entry in one store. Code pages are made RWX rather than RW, because
     //    the agent's own code may share a page with a site.
-    if (patch.sites.empty()) return {};
+    if (patch.sites.empty()) {
+        for (const auto& object : patch.debug_objects) register_debug_object(object);
+        return {};
+    }
     std::vector<uint64_t> stopped_at;
     std::string error;
     for (int attempt = 0;; ++attempt) {
@@ -141,6 +144,7 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
     }
     sync_cores();
     resume_other_threads();
+    for (const auto& object : patch.debug_objects) register_debug_object(object);
     return {};
 }
 

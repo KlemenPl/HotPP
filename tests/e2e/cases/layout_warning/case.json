@@ -1,0 +1,14 @@
+{
+  "steps": [
+    {
+      "name": "grow a struct in a header",
+      "copy": {
+        "item.h": "v2/item.h"
+      },
+      "expect": [
+        "^\\[hotpp\\] warning: layout of Item changed \\(4 -> 8 bytes\\)",
+        "^\\[hotpp\\] patch 1 applied"
+      ]
+    }
+  ]
+}

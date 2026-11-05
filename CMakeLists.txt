@@ -24,6 +24,7 @@ set(HOTPP_WARNINGS -Wall -Wextra)
 # --- agent: static library linked into the target application ---------------
 add_library(hotpp_agent STATIC
     src/agent/agent.cpp
+    src/agent/jit_debug.cpp
     src/agent/patcher.cpp
     src/agent/platform_linux.cpp
     src/agent/region_select.cpp
@@ -47,6 +48,7 @@ if(HOTPP_BUILD_HOST)
         src/host/session.cpp
         src/host/elf/elf_file.cpp
         src/host/image/dwarf.cpp
+        src/host/image/dwarf_reader.cpp
         src/host/image/elf_image.cpp
         src/host/link/linker.cpp
         src/host/link/patch_site.cpp

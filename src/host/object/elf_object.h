@@ -48,6 +48,8 @@ public:
     std::vector<ObjSymbol> symbols;   // indexed like the ELF symbol table
     std::vector<ObjGroup> groups;
 
+    const elf::ElfFile& file() const { return file_; }
+
 private:
     elf::ElfFile file_;
 };

@@ -68,6 +68,7 @@ struct Patch {
     std::vector<PatchSite> sites;
     uint64_t eh_frame = 0;              // start of the patch's .eh_frame (zero-terminated), or 0
     std::vector<uint64_t> initializers; // dynamic initializers to call, in order, before redirecting
+    std::vector<std::vector<uint8_t>> debug_objects; // relocated ELF objects for the debugger (§9)
 };
 
 struct PatchResult {
@@ -194,6 +195,8 @@ inline void encode(Writer& w, const Patch& m) {
     w.u64(m.eh_frame);
     w.u32(uint32_t(m.initializers.size()));
     for (uint64_t a : m.initializers) w.u64(a);
+    w.u32(uint32_t(m.debug_objects.size()));
+    for (const auto& d : m.debug_objects) put_bytes(w, d);
 }
 
 inline bool decode(Reader& r, Patch& m) {
@@ -225,6 +228,10 @@ inline bool decode(Reader& r, Patch& m) {
     if (!r.ok() || inits > r.remaining() / 8) return false;
     m.initializers.resize(inits);
     for (uint64_t& a : m.initializers) a = r.u64();
+    uint32_t debug = r.u32();
+    if (!r.ok() || debug > r.remaining() / 4) return false;
+    m.debug_objects.resize(debug);
+    for (auto& d : m.debug_objects) d = get_bytes(r);
     return r.ok() && r.at_end();
 }
 

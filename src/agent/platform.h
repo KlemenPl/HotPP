@@ -44,6 +44,10 @@ void resume_other_threads();
 // After modifying code other threads may run: serialize every core (no-op if unsupported).
 void sync_cores();
 
+// Hands an in-memory ELF object describing patched code to an attached debugger
+// (gdb's JIT interface). The bytes are kept for the life of the process.
+void register_debug_object(const std::vector<uint8_t>& object);
+
 // Byte stream to the host. send/recv transfer exactly `size` bytes or fail.
 Connection* ipc_connect(const std::string& endpoint);
 bool ipc_send(Connection* c, const void* data, size_t size);

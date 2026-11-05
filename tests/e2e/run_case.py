@@ -10,6 +10,10 @@ to check its final state; the case passes if it prints PASS and exits 0.
 
 The build-tree copies are restored to v1 (content and timestamps) afterwards, so
 the next build doesn't recompile the test program.
+
+With "gdb" in case.json, the program runs under gdb with that script instead,
+connected to a separate host, and "expect_output" lists lines the script must
+print (in order) after the last step.
 """
 import argparse
 import json
@@ -25,19 +29,34 @@ import time
 
 
 class Output:
-    def __init__(self, proc):
+    """Lines of one or more processes' stdout, interleaved as they arrive."""
+
+    def __init__(self, procs):
         self.lines = []
         self._queue = queue.Queue()
+        self._open = len(procs)
         self.closed = False
-        threading.Thread(target=self._pump, args=(proc,), daemon=True).start()
+        for proc in procs:
+            threading.Thread(target=self._pump, args=(proc,), daemon=True).start()
 
     def _pump(self, proc):
         for line in proc.stdout:
             self._queue.put(line)
         self._queue.put(None)
 
+    def _take(self, line):
+        if line is None:
+            self._open -= 1
+            self.closed = self._open == 0
+        else:
+            self.lines.append(line)
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
     def wait_for(self, pattern, start, deadline, count=1):
         """Index of the line after the count-th match of pattern at or after start."""
+        if count <= 0:
+            return start
         rx = re.compile(pattern)
         seen = 0
         i = start
@@ -57,28 +76,17 @@ class Output:
             if remaining <= 0:
                 raise RuntimeError(f"timed out waiting for {pattern!r}")
             try:
-                line = self._queue.get(timeout=min(remaining, 0.5))
+                self._take(self._queue.get(timeout=min(remaining, 0.5)))
             except queue.Empty:
                 continue
-            if line is None:
-                self.closed = True
-            else:
-                self.lines.append(line)
-                sys.stdout.write(line)
-                sys.stdout.flush()
 
     def drain(self, timeout):
         deadline = time.monotonic() + timeout
         while not self.closed and time.monotonic() < deadline:
             try:
-                line = self._queue.get(timeout=0.2)
+                self._take(self._queue.get(timeout=0.2))
             except queue.Empty:
                 continue
-            if line is None:
-                self.closed = True
-            else:
-                self.lines.append(line)
-                sys.stdout.write(line)
 
 
 def main() -> int:
@@ -110,10 +118,21 @@ def main() -> int:
     stop_file = os.path.join(args.work, "stop")
     if os.path.exists(stop_file):
         os.remove(stop_file)
-    env = dict(os.environ, HOTPP_E2E_STOP=stop_file)
-    proc = subprocess.Popen([args.host, "--", args.exe], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1, start_new_session=True, env=env)
-    out = Output(proc)
+    env = dict(os.environ, HOTPP_E2E_STOP=stop_file, **spec.get("env", {}))
+    popen = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+    procs = []
+    if "gdb" in spec:
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+        endpoint = os.path.join(runtime, f"hotpp-e2e-{os.getpid()}.sock")
+        procs.append(subprocess.Popen([args.host, "--endpoint", endpoint, "--once"], env=env, **popen))
+        time.sleep(0.3)  # let the host start listening
+        env.update(HOTPP_ENDPOINT=endpoint, HOTPP_LAUNCH_HOST="0")
+        script = os.path.join(args.case, spec["gdb"])
+        procs.append(subprocess.Popen(["gdb", "-q", "-batch", "-nx", "-iex", "set debuginfod enabled off",
+                                       "-x", script, "--args", args.exe], env=env, **popen))
+    else:
+        procs.append(subprocess.Popen([args.host, "--", args.exe], env=env, **popen))
+    out = Output(procs)
     error = None
     try:
         t = lambda: time.monotonic() + args.step_timeout
@@ -123,21 +142,27 @@ def main() -> int:
             print(f"--- step {n}: {step.get('name', '')}", flush=True)
             for dst, src in step["copy"].items():
                 shutil.copyfile(os.path.join(args.case, src), os.path.join(args.work, dst))
-            pos = out.wait_for(step["expect"], pos, t())
+            expect = step["expect"]
+            for pattern in expect if isinstance(expect, list) else [expect]:
+                pos = out.wait_for(pattern, pos, t())
             pos = out.wait_for(r"^frame \d+$", pos, t(), count=settle)
+        for pattern in spec.get("expect_output", []):
+            pos = out.wait_for(pattern, pos, t())
         open(stop_file, "w").close()
         out.drain(15)
-        code = proc.wait(timeout=15)
-        if code != 0:
-            error = f"host exited with {code}"
-        elif not any(line.startswith("PASS") for line in out.lines):
+        for proc in procs:
+            code = proc.wait(timeout=15)
+            if code != 0 and not error:
+                error = f"{proc.args[0]} exited with {code}"
+        if not error and not any(line.startswith("PASS") for line in out.lines):
             error = "the program did not report PASS"
     except RuntimeError as e:
         error = str(e)
     finally:
-        if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+        for proc in procs:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
         for path, (content, st) in originals.items():
             with open(path, "wb") as f:
                 f.write(content)

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -155,11 +156,13 @@ public:
         collect_globals();
         resolve_externals();
         find_initializers();
+        collect_canonical_entries();
         plan_got_and_stubs();
         layout();
         apply_relocations();
         make_sites_and_delta();
         emit();
+        if (opt_.debug_objects) build_debug_objects();
         return std::move(out_);
     }
 
@@ -489,6 +492,53 @@ private:
                                  " existing ones, into scratch copies; side effects such as registration or I/O happened again");
     }
 
+    // GCC takes the address of a local function through its *section* symbol
+    // (`lea .text._ZL3foov+1(%rip)`), which resolve_symbol() can't tell from any
+    // other reference into the section. When the referenced spot is exactly the
+    // entry of a function that already exists, use its canonical address, as for
+    // symbol references. Unwind tables must describe the new code, so they're exempt.
+    // A PC32 relocation is a call or jump when the rel32 follows a call/jmp/jcc opcode.
+    // (A RIP-relative operand's ModRM byte can never be E8/E9.)
+    bool is_branch(size_t o, uint32_t sec, const Rela& r) const {
+        const uint32_t type = r.type();
+        if (type == R_X86_64_PLT32) return true;
+        if (type != R_X86_64_PC32 || st_[o].secs[sec].kind != SecKind::Text) return false;
+        const ObjSection& s = obj(o).sections[sec];
+        if (!s.data || r.offset < 1 || r.offset > s.size) return false;
+        const uint8_t op = s.data[r.offset - 1];
+        if (op == 0xE8 || op == 0xE9) return true;
+        return r.offset >= 2 && s.data[r.offset - 2] == 0x0F && (op & 0xF0) == 0x80;
+    }
+
+    Target canonical_section_target(size_t o, uint32_t from_sec, const Rela& r, const Target& t) const {
+        const uint32_t type = r.type();
+        if (t.kind != Target::InPatch || is_branch(o, from_sec, r)) return t;
+        if (st_[o].secs[from_sec].kind == SecKind::EhFrame) return t;
+        const ObjSymbol& s = obj(o).symbols[r.sym()];
+        if (s.type != STT_SECTION || st_[t.obj].secs[t.sec].kind != SecKind::Text) return t;
+        // The byte the reference means: RIP-relative operands end the instruction, so
+        // a PC32 addend is the offset minus 4.
+        const int64_t entry = type == R_X86_64_PC32 ? r.addend + 4 : r.addend;
+        auto it = canonical_.find({t.obj, t.sec});
+        if (it == canonical_.end()) return t;
+        for (const auto& [offset, address] : it->second)
+            if (int64_t(offset) == entry) return {Target::Absolute, address - offset};
+        return t;
+    }
+
+    void collect_canonical_entries() {
+        for (size_t o = 0; o < st_.size(); ++o) {
+            const ElfObject& ob = obj(o);
+            for (size_t k = 0; k < ob.symbols.size(); ++k) {
+                const IndexEntry* e = st_[o].existing[k];
+                const ObjSymbol& s = ob.symbols[k];
+                if (e && e->kind == SymbolKind::Function && s.type == STT_FUNC &&
+                    st_[o].secs[s.shndx].kind == SecKind::Text)
+                    canonical_[{o, s.shndx}].emplace_back(s.value, e->address);
+            }
+        }
+    }
+
     static bool is_got(uint32_t type) {
         return type == R_X86_64_GOTPCREL || type == R_X86_64_GOTPCRELX || type == R_X86_64_REX_GOTPCRELX;
     }
@@ -520,9 +570,9 @@ private:
             const uint32_t type = r.type();
             const bool in_init = st_[o].secs[si].init_code;
             if (is_got(type)) {
-                const Target t = resolve_symbol(o, r.sym(), false, in_init);
+                const Target t = canonical_section_target(o, si, r, resolve_symbol(o, r.sym(), false, in_init));
                 got_slot(target_key(t), {GotSlot{false, t, 0}});
-            } else if (type == R_X86_64_PLT32) {
+            } else if (is_branch(o, si, r)) {
                 const Target t = resolve_symbol(o, r.sym(), true, in_init);
                 if (t.kind == Target::External && !stub_index_.count(t.value)) {
                     stub_index_[t.value] = stub_targets_.size();
@@ -680,15 +730,18 @@ private:
                 if (v != int64_t(int32_t(v))) throw LinkError("TLS offset out of range in " + file_of(ob));
                 put32(p, uint32_t(int32_t(v)));
             };
-            auto sym_target = [&](bool call) { return resolve_symbol(o, r.sym(), call, in_init); };
+            const bool branch = is_branch(o, si, r);
+            auto sym_target = [&](bool) {
+                return canonical_section_target(o, si, r, resolve_symbol(o, r.sym(), branch, in_init));
+            };
 
             switch (type) {
             case R_X86_64_64: put64(p, address(sym_target(false)) + uint64_t(A)); break;
             case R_X86_64_PC64: put64(p, address(sym_target(false)) + uint64_t(A) - P); break;
-            case R_X86_64_PC32: pc32(address(sym_target(false))); break;
-            case R_X86_64_PLT32: {
-                const Target t = sym_target(true);
-                pc32(t.kind == Target::External ? stub_base_ + 16 * stub_index_.at(t.value) : address(t));
+            case R_X86_64_PC32: case R_X86_64_PLT32: {
+                // Calls and jumps into shared libraries go through stubs.
+                const Target t = sym_target(branch);
+                pc32(branch && t.kind == Target::External ? stub_base_ + 16 * stub_index_.at(t.value) : address(t));
                 break;
             }
             case R_X86_64_GOTPCREL: case R_X86_64_GOTPCRELX: case R_X86_64_REX_GOTPCRELX:
@@ -816,11 +869,88 @@ private:
         out_.bytes_used = data_start_ + data_size_ - opt_.region_cursor;
     }
 
+    // Where section i of object o lives for the debugger: its patch address, or the
+    // old address for data bound to the running program.
+    uint64_t debug_address(size_t o, uint32_t i) const {
+        const SecState& ss = st_[o].secs[i];
+        if (ss.discarded) {
+            auto k = kept_copy_.find({o, i});
+            return k == kept_copy_.end() ? 0 : debug_address(k->second.first, k->second.second);
+        }
+        if (loaded(ss)) return ss.addr;
+        if (ss.bound_old && ss.kind != SecKind::Tls) return ss.old_base;
+        return 0;
+    }
+
+    // Value of symbol k as the debugger sees it, never throwing: debug info may
+    // mention symbols the patch doesn't otherwise use.
+    uint64_t debug_symbol_value(size_t o, uint32_t k) const {
+        const ObjSymbol& s = obj(o).symbols[k];
+        if (s.shndx == SHN_ABS) return s.value;
+        if (s.defined() && s.shndx < SHN_LORESERVE) {
+            const SecState& ss = st_[o].secs[s.shndx];
+            if (ss.kind == SecKind::Tls && ss.bound_old) return ss.old_base + s.value;
+            return debug_address(o, s.shndx) + (s.type == STT_SECTION ? 0 : s.value);
+        }
+        if (s.bind == STB_LOCAL) return 0;
+        if (const IndexEntry* e = index_.find({false, "", s.name})) return e->address;
+        auto x = external_.find(s.name);
+        return x != external_.end() ? x->second : 0;
+    }
+
+    // A copy of each object with allocated sections' sh_addr set to where they live,
+    // their contents replaced by the final bytes, debug sections relocated, and every
+    // relocation section disabled so the debugger doesn't apply them again.
+    void build_debug_objects() {
+        for (size_t o = 0; o < st_.size(); ++o) {
+            const ElfObject& ob = obj(o);
+            const elf::ElfFile& f = ob.file();
+            std::vector<uint8_t> img = f.bytes();
+            const uint64_t shoff = f.header().shoff;
+            for (uint32_t i = 0; i < f.sections().size(); ++i) {
+                const Shdr& sh = f.sections()[i];
+                const uint64_t hdr = shoff + uint64_t(i) * sizeof(Shdr);
+                if (sh.flags & SHF_ALLOC) {
+                    const uint64_t addr = debug_address(o, i);
+                    std::memcpy(img.data() + hdr + offsetof(Shdr, addr), &addr, 8);
+                    const SecState& ss = st_[o].secs[i];
+                    if (loaded(ss) && ss.kind != SecKind::Bss && sh.type != SHT_NOBITS)
+                        std::memcpy(img.data() + sh.offset, buffer_at(ss.addr, sh.size), sh.size);
+                }
+                if (sh.type != SHT_RELA) continue;
+                if (sh.info < f.sections().size() && !(f.sections()[sh.info].flags & SHF_ALLOC))
+                    relocate_debug_section(o, sh.info, img);
+                const uint32_t null_type = SHT_NULL;
+                std::memcpy(img.data() + hdr + offsetof(Shdr, type), &null_type, 4);
+            }
+            out_.patch.debug_objects.push_back(std::move(img));
+        }
+    }
+
+    void relocate_debug_section(size_t o, uint32_t target, std::vector<uint8_t>& img) const {
+        const ElfObject& ob = obj(o);
+        const Shdr& sh = ob.file().sections()[target];
+        for (const Rela& r : ob.sections[target].relocs) {
+            const uint32_t type = r.type();
+            const uint64_t width = type == R_X86_64_64 || type == R_X86_64_DTPOFF64 ? 8 : 4;
+            if (r.offset > sh.size || width > sh.size - r.offset) continue;
+            uint8_t* p = img.data() + sh.offset + r.offset;
+            const uint64_t v = debug_symbol_value(o, r.sym()) + uint64_t(r.addend);
+            switch (type) {
+            case R_X86_64_64: case R_X86_64_DTPOFF64: put64(p, v); break;
+            case R_X86_64_32: case R_X86_64_32S: case R_X86_64_DTPOFF32: put32(p, uint32_t(v)); break;
+            default: break; // nothing else appears in debug sections
+            }
+        }
+    }
+
     const SymbolIndex& index_;
     const ExternalResolver& resolve_;
     LinkOptions opt_;
     std::vector<ObjState> st_;
     std::map<std::pair<size_t, uint32_t>, std::pair<size_t, uint32_t>> kept_copy_;
+    // Text section -> (offset, canonical address) of the existing functions it defines.
+    std::map<std::pair<size_t, uint32_t>, std::vector<std::pair<uint64_t, uint64_t>>> canonical_;
     std::unordered_map<std::string, std::pair<size_t, size_t>> globals_;
     std::unordered_map<std::string, uint64_t> external_;
     std::unordered_map<std::string, size_t> got_index_;
