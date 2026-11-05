@@ -28,7 +28,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates git nodejs \
-            build-essential clang cmake python3 gdb
+            build-essential clang libclang-rt-19-dev cmake python3 gdb
       - uses: actions/checkout@v4
       - name: Configure
         run: |
