@@ -1,7 +1,8 @@
-// HotPP agent: lives inside the target process, reserves patch memory and talks to
-// the host. M0 implements the handshake; patch application arrives in M1.
+// HotPP agent: lives inside the target process, reserves patch memory, talks to the
+// host and applies the patches it sends.
 #include "hotpp/hotpp.h"
 
+#include "agent/patcher.h"
 #include "agent/platform.h"
 #include "common/endpoint.h"
 #include "common/messages.h"
@@ -38,8 +39,13 @@ struct AgentState {
     agent::Connection* conn = nullptr;
     agent::Thread* reader = nullptr;
     std::vector<RegionRecord> regions; // kept until process exit: patch code lives here
+    ModuleRecord main_module;
     std::atomic<bool> connected{false};
     bool initialized = false;
+
+    std::mutex queue_mutex;
+    std::vector<Patch> pending; // received, waiting for sync_point()
+    std::atomic<bool> has_pending{false};
 };
 
 AgentState& state() {
@@ -78,10 +84,29 @@ void reader_main(void*) {
     std::vector<uint8_t> payload;
     while (recv_message(s, h, payload)) {
         if (h.type == MsgType::Bye) break;
+        Reader r(payload.data(), payload.size());
         if (h.type == MsgType::Log) {
-            Reader r(payload.data(), payload.size());
             LogMsg msg;
             if (decode(r, msg)) agent::log("host: %s", msg.text.c_str());
+        } else if (h.type == MsgType::Patch) {
+            Patch patch;
+            if (!decode(r, patch)) {
+                agent::log("malformed patch from host; ignored");
+                continue;
+            }
+            std::lock_guard<std::mutex> lock(s.queue_mutex);
+            s.pending.push_back(std::move(patch));
+            s.has_pending = true;
+        } else if (h.type == MsgType::ResolveRequest) {
+            ResolveRequest req;
+            if (!decode(r, req)) continue;
+            ResolveReply reply;
+            reply.id = req.id;
+            for (const std::string& name : req.names)
+                reply.addresses.push_back(agent::resolve_symbol(name));
+            Writer w;
+            encode(w, reply);
+            send_message(s, MsgType::ResolveReply, w);
         }
         // Unknown message types are skipped, so newer hosts can add messages.
     }
@@ -165,6 +190,7 @@ bool init(const Config& cfg) {
         return false;
     }
     hello.regions = s.regions;
+    s.main_module = hello.modules[0];
 
     const std::string endpoint = pick(cfg.endpoint, "HOTPP_ENDPOINT", default_endpoint());
     s.conn = connect_or_launch(endpoint, cfg);
@@ -210,7 +236,24 @@ bool init(const Config& cfg) {
 }
 
 void sync_point() {
-    // Patches queued by the agent thread are applied here (M1).
+    AgentState& s = state();
+    if (!s.has_pending.load(std::memory_order_acquire)) return;
+    std::vector<Patch> todo;
+    {
+        std::lock_guard<std::mutex> lock(s.queue_mutex);
+        todo.swap(s.pending);
+        s.has_pending = false;
+    }
+    for (const Patch& patch : todo) {
+        PatchResult result;
+        result.id = patch.id;
+        result.error = agent::apply_patch(patch, s.regions, s.main_module);
+        result.ok = result.error.empty();
+        if (!result.ok) agent::log("patch %u failed: %s", unsigned(patch.id), result.error.c_str());
+        Writer w;
+        encode(w, result);
+        if (s.connected) send_message(s, MsgType::PatchResult, w);
+    }
 }
 
 void shutdown() {

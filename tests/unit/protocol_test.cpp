@@ -12,8 +12,8 @@ Hello sample_hello() {
     h.arch = Arch::X64;
     h.exe = "/usr/bin/app";
     h.compile_commands = "/build/compile_commands.json";
-    h.modules.push_back({0x555500000000, 0x555500000000, 0x5000, "/usr/bin/app"});
-    h.modules.push_back({0x7f0000000000, 0x7f0000001000, 0x200000, "/lib/libc.so.6"});
+    h.modules.push_back({0x555500000000, 0x555500000000, 0x5000, "/usr/bin/app", {1, 2, 3}});
+    h.modules.push_back({0x7f0000000000, 0x7f0000001000, 0x200000, "/lib/libc.so.6", {}});
     h.regions.push_back({0x5554e0000000, 512ull << 20, 0});
     return h;
 }

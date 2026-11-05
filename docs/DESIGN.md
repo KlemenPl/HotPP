@@ -1,6 +1,6 @@
 # HotPP — Design
 
-Status: draft · Last updated: 2026-11-05
+Status: M0 and M1 implemented · Last updated: 2026-11-05
 
 HotPP is a hot-reload tool for C++ on Linux and Windows. You edit a `.cpp` file or a header, save it, and the running program picks up the new code within about two seconds. It doesn't restart and doesn't lose state.
 
@@ -146,7 +146,7 @@ The host listens and agents connect. One host serves any number of agents.
 
 ### 5.3 Recompiling
 1. Affected set = the changed `.cpp` file itself, or every TU whose include set contains the changed header.
-2. For each affected TU, take the exact `command`/`arguments` from `compile_commands.json`. Rewrite only the output path (`-o` / `/Fo`) to `.hotpp/patches/<n>/<tu>.o(bj)` and add the dependency-output flag.
+2. For each affected TU, take the exact `command`/`arguments` from `compile_commands.json`. Rewrite only the output path (`-o` / `/Fo`) to `<build>/.hotpp/<pid>/patch-<n>/`, drop the build's own dependency-file flags (`-MD`, `-MF` and so on, which would overwrite its `.d` files), and add `-ffunction-sections -fdata-sections` (§7.2).
 3. Compile in parallel, by default with as many jobs as hardware threads.
 4. On any failure, show the compiler output in the host console and apply nothing. The next save retries.
 
@@ -169,7 +169,8 @@ The host builds an index of every symbol in the running image, mapping identity 
 - **Same-name files:** `STT_FILE` holds only the base name, so for duplicates such as `a/util.cpp` and `b/util.cpp`, HotPP falls back to DWARF:
   - compile-unit address ranges (`DW_AT_ranges` / `.debug_aranges`) for functions
   - `DW_TAG_variable` locations for data
-- The TU is mapped back to its `compile_commands.json` entry by the `DW_AT_name` / `DW_AT_comp_dir` of the compile unit.
+- The TU is mapped back to its `compile_commands.json` entry by the `DW_AT_name` / `DW_AT_comp_dir` of the compile unit. The set of compile units also decides which sources belong to the running program, so editing a file of another target in the same build is ignored rather than patched in.
+- **Identity check:** the agent sends each module's GNU build ID as mapped in memory. If the executable on disk has a different one (it was rebuilt since the program started), the host refuses to patch, because its symbol table no longer describes the running code.
 
 ### 6.2 Windows (PE + PDB)
 - The PDB is parsed with RawPDB (Molecular Matters; license to be checked before adopting), or a small in-house reader if the license doesn't fit.
@@ -212,10 +213,14 @@ For every symbol a patch defines that already exists in the index, the policy de
 | Read-only named data (`.rodata`, `.rdata`) | **new** | Changed constants and tables take effect. |
 | Unnamed constants, string literals, jump tables | **new** | They belong to the new code. |
 
+**Binding is per section, not per symbol.** Compilers refer to internal variables through *section* symbols (`.bss._ZL5ticks - 4`), not through the variable's own symbol, so a per-symbol rule would miss them. Patch compiles therefore add `-fdata-sections`: each variable gets its own section, and a section whose named symbols all exist in the index is bound as a whole to the old address (`old address − symbol offset`). A section mixing existing and new variables is an error. Text sections are always loaded new.
+
+**Canonical function addresses.** Calls in the patch go straight to the new code. *Taking the address* of an existing function (a `lea`, a GOT slot, a vtable or a pointer constant) yields the function's original address instead. Function pointers then compare equal between old and new code, and they reach the newest version through the redirect.
+
 Undefined references in the patch objects resolve in this order:
 1. definitions in the patch itself, subject to the policy above
 2. the symbol index, which includes earlier patches
-3. other loaded modules' exports (libc, the C++ runtime and so on), resolved by the host from the module list
+3. other loaded modules' exports (libc, the C++ runtime and so on). The host sends all such names to the agent in one `ResolveRequest`, and the agent looks them up with `dlsym(RTLD_DEFAULT)` (`GetProcAddress` on Windows). This picks the default symbol version and resolves GNU IFUNCs (`memcpy`, `strlen`) to the implementation, exactly as the dynamic linker did, which reading the libraries' `.dynsym` on disk would not.
 
 Anything still unresolved is an error, and no patch is applied.
 
@@ -324,7 +329,7 @@ If a function is too small or has no padding, for example because it came from a
 2. Copy the segments.
 3. Set final protections (RX / R / RW).
 4. On Windows, call `FlushInstructionCache`. x86-64 Linux needs no explicit flush; a serializing operation suffices.
-5. Patch sites follow the same RW → write → RX sequence on the original code pages.
+5. Patch sites on existing code pages are the exception: they are made RWX for the write, then RX again. The agent's own code can share a page with a function being redirected, and making that page non-executable would crash the agent mid-write.
 
 ### 8.5 Unwind registration
 - **Linux:** the relocated `.eh_frame` of the patch is registered with `__register_frame` (libgcc/libunwind). Exceptions thrown through new code unwind correctly, including across a mix of old and new frames.
@@ -442,6 +447,15 @@ Defining `HOTPP_DISABLE` turns the whole API into inline no-ops for shipping bui
 | **M5** | Extended: patching `.so`/`.dll` modules, hot restart, injecting into an app without the agent, ARM64 | Scoped separately. |
 
 Each milestone ends with a git commit, pushed to the Gitea remote, once its "done when" condition is met, for example `M1: Linux MVP`.
+
+**Known limits after M1** (each is planned for M3 unless noted):
+- Only `.cpp` edits are patched; header edits are reported and ignored.
+- Dynamic initializers in a patch don't run, so a *new* global that needs one starts zeroed.
+- `.eh_frame` isn't registered yet. An exception thrown through new code can't unwind and ends in `std::terminate`.
+- `thread_local` variables, new or existing, make a patch fail with "restart required".
+- Other threads aren't paused while patch sites are written. Applying patches only in `sync_point()` keeps this safe for code that just the calling thread runs.
+- A new direct reference to a shared-library *variable* (GCC with `-fPIE` emits these when the executable has no copy) is rejected with "restart required".
+- Windows processes connect but aren't patched (M2).
 
 ---
 

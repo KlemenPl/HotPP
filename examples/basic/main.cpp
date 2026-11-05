@@ -1,7 +1,12 @@
-// Minimal HotPP sample: a loop calling a function you can edit while it runs.
+// Minimal HotPP sample: a loop calling code you can edit while it runs.
 //
 //   hotpp -- ./hotpp_example_basic            # start it under a host
 //   ./hotpp_example_basic --frames 10         # or connect to a running host
+//
+// Then edit compute() in game.cpp and save: the output changes, and the frame
+// counter keeps counting.
+#include "game.h"
+
 #include <hotpp/hotpp.h>
 
 #include <chrono>
@@ -9,10 +14,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
-
-static int frame_counter = 0; // state that survives patches
-
-int compute(int frame) { return frame * 2; }
 
 int main(int argc, char** argv) {
     long frames = -1;
@@ -35,7 +36,7 @@ int main(int argc, char** argv) {
         hotpp::sync_point();
         std::printf("frame %d: compute() = %d\n", frame_counter, compute(frame_counter));
         std::fflush(stdout);
-        ++frame_counter;
+        update();
         std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
     }
 

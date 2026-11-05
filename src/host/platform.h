@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,6 +32,11 @@ std::unique_ptr<Listener> listen(const std::string& endpoint, std::string& error
 // Runs argv[0] (searched on PATH) with the host's stdio, waits for it and returns
 // its exit code (128 + signal number if killed by a signal), or -1 if it couldn't start.
 int run_child(const std::vector<std::string>& argv, std::string& error);
+
+// Runs argv[0] in `cwd` with stdout and stderr captured into `output`, waits for it
+// and returns its exit code, or -1 (with `error` set) if it couldn't start.
+int run_capture(const std::vector<std::string>& argv, const std::filesystem::path& cwd,
+                std::string& output, std::string& error);
 
 bool set_env(const char* name, const std::string& value);
 uint32_t current_pid();

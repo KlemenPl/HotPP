@@ -28,6 +28,7 @@ endif()
 # --- agent: static library linked into the target application ---------------
 add_library(hotpp_agent STATIC
     src/agent/agent.cpp
+    src/agent/patcher.cpp
     src/agent/region_select.cpp)
 add_library(hotpp::agent ALIAS hotpp_agent)
 
@@ -51,18 +52,33 @@ endif()
 
 # --- host: the hotpp executable ----------------------------------------------
 if(HOTPP_BUILD_HOST)
-    add_executable(hotpp src/host/main.cpp)
+    # Everything but main(), so unit tests can link the host code.
+    add_library(hotpp_host_lib STATIC
+        src/host/compile_db.cpp
+        src/host/session.cpp
+        src/host/elf/elf_file.cpp
+        src/host/image/dwarf.cpp
+        src/host/image/elf_image.cpp
+        src/host/link/linker.cpp
+        src/host/link/patch_site.cpp
+        src/host/link/symbol_index.cpp
+        src/host/object/elf_object.cpp
+        src/host/util/json.cpp)
     if(WIN32)
-        target_sources(hotpp PRIVATE src/host/platform_win.cpp)
-        target_compile_definitions(hotpp PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+        target_sources(hotpp_host_lib PRIVATE src/host/platform_win.cpp src/host/watcher_win.cpp)
+        target_compile_definitions(hotpp_host_lib PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
     else()
-        target_sources(hotpp PRIVATE src/host/platform_linux.cpp)
+        target_sources(hotpp_host_lib PRIVATE src/host/platform_linux.cpp src/host/watcher_linux.cpp)
     endif()
-    target_include_directories(hotpp PRIVATE ${PROJECT_SOURCE_DIR}/src)
-    target_compile_features(hotpp PRIVATE cxx_std_20)
-    target_compile_definitions(hotpp PRIVATE HOTPP_VERSION="${PROJECT_VERSION}")
+    target_include_directories(hotpp_host_lib PUBLIC ${PROJECT_SOURCE_DIR}/src)
+    target_compile_features(hotpp_host_lib PUBLIC cxx_std_20)
+    target_compile_definitions(hotpp_host_lib PUBLIC HOTPP_VERSION="${PROJECT_VERSION}")
+    target_compile_options(hotpp_host_lib PRIVATE ${HOTPP_WARNINGS})
+    target_link_libraries(hotpp_host_lib PUBLIC Threads::Threads)
+
+    add_executable(hotpp src/host/main.cpp)
     target_compile_options(hotpp PRIVATE ${HOTPP_WARNINGS})
-    target_link_libraries(hotpp PRIVATE Threads::Threads)
+    target_link_libraries(hotpp PRIVATE hotpp_host_lib)
 endif()
 
 if(HOTPP_BUILD_EXAMPLES)

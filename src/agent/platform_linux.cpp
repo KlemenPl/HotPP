@@ -9,6 +9,7 @@
 #include <cstring>
 #include <ctime>
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <link.h>
 #include <pthread.h>
@@ -45,11 +46,36 @@ std::string get_env(const char* name) {
     return v ? v : "";
 }
 
-namespace {
-
 uint64_t page_size() {
     static const uint64_t size = uint64_t(sysconf(_SC_PAGESIZE));
     return size;
+}
+
+namespace {
+
+// NT_GNU_BUILD_ID from the module's PT_NOTE segments, as mapped in memory.
+std::vector<uint8_t> build_id(const dl_phdr_info* info) {
+    constexpr uint32_t kNtGnuBuildId = 3;
+    for (int i = 0; i < info->dlpi_phnum; ++i) {
+        const ElfW(Phdr)& ph = info->dlpi_phdr[i];
+        if (ph.p_type != PT_NOTE) continue;
+        const auto* p = reinterpret_cast<const uint8_t*>(info->dlpi_addr + ph.p_vaddr);
+        const uint8_t* end = p + ph.p_memsz;
+        while (p + 12 <= end) {
+            uint32_t namesz, descsz, type;
+            std::memcpy(&namesz, p, 4);
+            std::memcpy(&descsz, p + 4, 4);
+            std::memcpy(&type, p + 8, 4);
+            const uint8_t* name = p + 12;
+            const uint8_t* desc = name + ((namesz + 3) & ~3u);
+            const uint8_t* next = desc + ((descsz + 3) & ~3u);
+            if (next > end) break;
+            if (type == kNtGnuBuildId && namesz == 4 && std::memcmp(name, "GNU", 4) == 0)
+                return std::vector<uint8_t>(desc, desc + descsz);
+            p = next;
+        }
+    }
+    return {};
 }
 
 int collect_module(dl_phdr_info* info, size_t, void* data) {
@@ -70,6 +96,7 @@ int collect_module(dl_phdr_info* info, size_t, void* data) {
     m.size = ((hi + page - 1) & ~(page - 1)) - m.start;
     // dl_iterate_phdr visits the main program first, with an empty name.
     m.path = modules.empty() ? executable_path() : (info->dlpi_name ? info->dlpi_name : "");
+    m.build_id = build_id(info);
     modules.push_back(std::move(m));
     return 0;
 }
@@ -130,6 +157,25 @@ bool reserve_near(const proto::ModuleRecord& module, uint64_t size, proto::Regio
 
 void release_region(const proto::RegionRecord& region) {
     munmap(reinterpret_cast<void*>(region.base), region.size);
+}
+
+bool protect(uint64_t addr, uint64_t size, uint8_t prot) {
+    const uint64_t page = page_size();
+    const uint64_t start = addr & ~(page - 1);
+    const uint64_t end = (addr + size + page - 1) & ~(page - 1);
+    int p = PROT_NONE;
+    if (prot & proto::kProtRead) p |= PROT_READ;
+    if (prot & proto::kProtWrite) p |= PROT_WRITE;
+    if (prot & proto::kProtExec) p |= PROT_EXEC;
+    return mprotect(reinterpret_cast<void*>(start), end - start, p) == 0;
+}
+
+void flush_icache(uint64_t addr, uint64_t size) {
+    __builtin___clear_cache(reinterpret_cast<char*>(addr), reinterpret_cast<char*>(addr + size));
+}
+
+uint64_t resolve_symbol(const std::string& name) {
+    return reinterpret_cast<uint64_t>(dlsym(RTLD_DEFAULT, name.c_str()));
 }
 
 // --- IPC: Unix domain socket ---------------------------------------------------------

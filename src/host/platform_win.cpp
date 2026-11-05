@@ -144,6 +144,12 @@ int run_child(const std::vector<std::string>& args, std::string& error) {
     return int(code);
 }
 
+int run_capture(const std::vector<std::string>&, const std::filesystem::path&, std::string&,
+                std::string& error) {
+    error = "recompiling on Windows arrives in M2";
+    return -1;
+}
+
 bool set_env(const char* name, const std::string& value) {
     return SetEnvironmentVariableW(win::to_wide(name).c_str(), win::to_wide(value).c_str()) != 0;
 }

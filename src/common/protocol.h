@@ -14,16 +14,25 @@
 namespace hotpp::proto {
 
 constexpr uint32_t kMagic = 0x50544F48; // "HOTP"
-constexpr uint16_t kVersion = 1;
+constexpr uint16_t kVersion = 2;
 constexpr size_t kHeaderSize = 12;
 constexpr uint32_t kMaxPayload = 1u << 30;
 
 enum class MsgType : uint16_t {
-    Hello = 1,    // agent -> host
-    HelloAck = 2, // host -> agent
-    Bye = 3,      // either way: orderly disconnect
-    Log = 4,      // either way: text to show the user
+    Hello = 1,          // agent -> host
+    HelloAck = 2,       // host -> agent
+    Bye = 3,            // either way: orderly disconnect
+    Log = 4,            // either way: text to show the user
+    Patch = 5,          // host -> agent: code to map and functions to redirect
+    PatchResult = 6,    // agent -> host
+    ResolveRequest = 7, // host -> agent: look up symbols exported by loaded libraries
+    ResolveReply = 8,   // agent -> host
 };
+
+// Memory protection bits used in Patch segments.
+constexpr uint8_t kProtRead = 1;
+constexpr uint8_t kProtWrite = 2;
+constexpr uint8_t kProtExec = 4;
 
 enum class Platform : uint8_t { Unknown = 0, Linux = 1, Windows = 2 };
 enum class Arch : uint8_t { Unknown = 0, X64 = 1 };
@@ -79,6 +88,7 @@ public:
         put(s, n);
     }
     void str(const char* s) { str(s, s ? std::strlen(s) : 0); }
+    void raw(const void* p, size_t n) { put(p, n); }
 
     bool ok() const { return ok_; }
     const uint8_t* data() const { return data_; }
@@ -136,6 +146,16 @@ public:
         StrView s{reinterpret_cast<const char*>(data_ + pos_), n};
         pos_ += n;
         return s;
+    }
+    // Pointer to the next n bytes, or nullptr (and !ok()) if fewer remain.
+    const uint8_t* raw(size_t n) {
+        if (!ok_ || n > remaining()) {
+            ok_ = false;
+            return nullptr;
+        }
+        const uint8_t* p = data_ + pos_;
+        pos_ += n;
+        return p;
     }
 
     bool ok() const { return ok_; }

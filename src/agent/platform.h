@@ -24,6 +24,13 @@ std::vector<proto::ModuleRecord> enumerate_modules();
 bool reserve_near(const proto::ModuleRecord& module, uint64_t size, proto::RegionRecord& out);
 void release_region(const proto::RegionRecord& region);
 
+uint64_t page_size();
+// Sets protection (proto::kProt* bits) of whole pages covering [addr, addr + size).
+bool protect(uint64_t addr, uint64_t size, uint8_t prot);
+void flush_icache(uint64_t addr, uint64_t size);
+// Address of an exported symbol in any loaded module (default version), or 0.
+uint64_t resolve_symbol(const std::string& name);
+
 // Byte stream to the host. send/recv transfer exactly `size` bytes or fail.
 Connection* ipc_connect(const std::string& endpoint);
 bool ipc_send(Connection* c, const void* data, size_t size);

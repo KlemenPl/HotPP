@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <fcntl.h>
 #include <spawn.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -148,6 +149,53 @@ int run_child(const std::vector<std::string>& args, std::string& error) {
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return -1;
+}
+
+int run_capture(const std::vector<std::string>& args, const std::filesystem::path& cwd,
+                std::string& output, std::string& error) {
+    int fds[2];
+    if (::pipe2(fds, O_CLOEXEC) != 0) {
+        error = errno_text("pipe", errno);
+        return -1;
+    }
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], STDERR_FILENO);
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (!cwd.empty()) posix_spawn_file_actions_addchdir_np(&actions, cwd.c_str());
+
+    std::vector<char*> argv;
+    for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+    pid_t pid = 0;
+    int rc = posix_spawnp(&pid, argv[0], &actions, nullptr, argv.data(), environ);
+    posix_spawn_file_actions_destroy(&actions);
+    ::close(fds[1]);
+    if (rc != 0) {
+        ::close(fds[0]);
+        error = errno_text(("cannot start " + args[0]).c_str(), rc);
+        return -1;
+    }
+    char buf[4096];
+    for (;;) {
+        ssize_t n = ::read(fds[0], buf, sizeof buf);
+        if (n > 0) {
+            output.append(buf, size_t(n));
+        } else if (n == 0 || errno != EINTR) {
+            break;
+        }
+    }
+    ::close(fds[0]);
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            error = errno_text("waitpid", errno);
+            return -1;
+        }
+    }
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1;
 }
 
 bool set_env(const char* name, const std::string& value) {

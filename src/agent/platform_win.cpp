@@ -108,6 +108,40 @@ void release_region(const proto::RegionRecord& region) {
     VirtualFree(reinterpret_cast<void*>(uintptr_t(region.base)), 0, MEM_RELEASE);
 }
 
+uint64_t page_size() {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return si.dwPageSize;
+}
+
+bool protect(uint64_t addr, uint64_t size, uint8_t prot) {
+    DWORD p = PAGE_NOACCESS;
+    const bool r = prot & proto::kProtRead, w = prot & proto::kProtWrite, x = prot & proto::kProtExec;
+    if (x) p = w ? PAGE_EXECUTE_READWRITE : (r ? PAGE_EXECUTE_READ : PAGE_EXECUTE);
+    else if (w) p = PAGE_READWRITE;
+    else if (r) p = PAGE_READONLY;
+    void* base = reinterpret_cast<void*>(uintptr_t(addr));
+    // Patch regions are only reserved; commit their pages on first use.
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery(base, &mbi, sizeof mbi) && mbi.State == MEM_RESERVE &&
+        !VirtualAlloc(base, SIZE_T(size), MEM_COMMIT, p))
+        return false;
+    DWORD old = 0;
+    return VirtualProtect(base, SIZE_T(size), p, &old) != 0;
+}
+
+void flush_icache(uint64_t addr, uint64_t size) {
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(uintptr_t(addr)), SIZE_T(size));
+}
+
+uint64_t resolve_symbol(const std::string& name) {
+    for (const proto::ModuleRecord& m : enumerate_modules()) {
+        HMODULE h = reinterpret_cast<HMODULE>(uintptr_t(m.base));
+        if (FARPROC p = GetProcAddress(h, name.c_str())) return uint64_t(uintptr_t(p));
+    }
+    return 0;
+}
+
 // --- IPC: named pipe, overlapped so ipc_shutdown can cancel a blocked read ---------
 
 struct Connection {
