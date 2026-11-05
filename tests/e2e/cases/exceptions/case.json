@@ -1,0 +1,11 @@
+{
+  "steps": [
+    {
+      "name": "change throwing and catching code",
+      "copy": {
+        "errors.cpp": "v2/errors.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied"
+    }
+  ]
+}

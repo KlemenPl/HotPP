@@ -1,0 +1,11 @@
+{
+  "steps": [
+    {
+      "name": "edit the header",
+      "copy": {
+        "shared.h": "v2/shared.h"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied.*a\\.cpp.*b\\.cpp|^\\[hotpp\\] patch 1 applied.*b\\.cpp.*a\\.cpp"
+    }
+  ]
+}

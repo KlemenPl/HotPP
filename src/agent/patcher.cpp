@@ -85,13 +85,50 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
         if (seg.prot & kProtExec) flush_icache(seg.addr, seg.size);
     }
 
-    // 2. Redirect old functions: long jump into the padding first, then the 2-byte
-    //    short jump at the entry in one store. Code pages are made RWX rather than RW
-    //    for the moment, because the agent's own code may share a page with a site.
+    // 2. Unwind tables, so exceptions can pass through the new code.
+    if (patch.eh_frame) {
+        if (!in_regions(patch.eh_frame, 4, regions)) return at("unwind table outside the patch region", patch.eh_frame);
+        if (!register_unwind_info(patch.eh_frame))
+            log("warning: no __register_frame in this process; exceptions thrown through patched code will terminate");
+    }
+
+    // 3. Dynamic initializers of new globals. They only see the patch's own code and
+    //    data, so they run before anything can reach the new code.
+    for (uint64_t init : patch.initializers) {
+        if (!in_regions(init, 1, regions)) return at("initializer outside the patch region", init);
+        try {
+            reinterpret_cast<void (*)()>(init)();
+        } catch (...) {
+            return at("dynamic initializer threw", init);
+        }
+    }
+
+    // 4. Redirect old functions with every other thread stopped outside the bytes
+    //    being rewritten: long jump into the padding first, then the 2-byte short jump
+    //    at the entry in one store. Code pages are made RWX rather than RW, because
+    //    the agent's own code may share a page with a site.
+    if (patch.sites.empty()) return {};
+    std::vector<uint64_t> stopped_at;
+    std::string error;
+    for (int attempt = 0;; ++attempt) {
+        if (!pause_other_threads(stopped_at, error)) return "cannot pause threads: " + error;
+        bool clear = true;
+        for (uint64_t rip : stopped_at)
+            for (const PatchSite& site : patch.sites) {
+                const SiteRange r = range_of(site);
+                clear = clear && !(rip >= r.lo && rip < r.hi);
+            }
+        if (clear) break;
+        resume_other_threads();
+        if (attempt == 200) return "a thread kept stopping inside a function entry being patched";
+        sleep_ms(1);
+    }
     for (const PatchSite& site : patch.sites) {
         const SiteRange r = range_of(site);
-        if (!protect(r.lo, r.hi - r.lo, kProtRead | kProtWrite | kProtExec))
+        if (!protect(r.lo, r.hi - r.lo, kProtRead | kProtWrite | kProtExec)) {
+            resume_other_threads();
             return at("cannot make code writable", site.entry_addr);
+        }
         uint8_t jmp[5] = {0xE9};
         const int32_t rel = int32_t(site.target - (site.pad_addr + 5));
         std::memcpy(jmp + 1, &rel, 4);
@@ -102,6 +139,8 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
         protect(r.lo, r.hi - r.lo, kProtRead | kProtExec);
         flush_icache(r.lo, r.hi - r.lo);
     }
+    sync_cores();
+    resume_other_threads();
     return {};
 }
 

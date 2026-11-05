@@ -30,6 +30,9 @@ struct LinkOptions {
     uint64_t region_cursor = 0; // first free byte of the patch region
     uint64_t region_end = 0;
     uint64_t page_size = 4096;
+    // Size of the executable's static TLS block (PT_TLS memsz rounded up to its
+    // alignment); thread-pointer offsets are symbol value minus this. 0: no TLS.
+    uint64_t tls_block_size = 0;
 };
 
 struct LinkResult {
@@ -40,6 +43,7 @@ struct LinkResult {
     size_t functions_new = 0;
     size_t data_kept = 0;
     size_t data_new = 0;
+    size_t initializers_run = 0;
     std::vector<std::string> notes; // things the user should know; not errors
     std::vector<std::string> log;   // every binding decision, for --verbose
 };

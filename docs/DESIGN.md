@@ -1,6 +1,6 @@
 # HotPP — Design
 
-Status: M0 and M1 implemented · Last updated: 2026-11-05
+Status: M0, M1 and M3 implemented (Linux); M2 (Windows) deferred · Last updated: 2026-11-05
 
 HotPP is a hot-reload tool for C++ on Linux and Windows. You edit a `.cpp` file or a header, save it, and the running program picks up the new code within about two seconds. It doesn't restart and doesn't lose state.
 
@@ -141,8 +141,9 @@ The host listens and agents connect. One host serves any number of agents.
   - GCC/Clang: `-MM -MF <file>`
   - MSVC: `/sourceDependencies <file>` with `/Zs` (syntax-only)
 - The initial scan runs in the background on a thread pool at host startup. Hot reload is usable before it finishes: `.cpp` edits work at once, and header edits wait for the scan.
-- Results are cached in `<build>/.hotpp/deps/`, keyed by a hash of the command plus the mtimes of every listed dependency.
-- Every patch compile also emits fresh dependency info, so the graph stays current as includes change.
+- Results are cached in `<build>/.hotpp/deps/`, one depfile per TU named by a hash of its path and arguments. A cached depfile is reused while neither the TU nor any file it lists is newer than it.
+- Every patch compile also emits fresh dependency info (`-MMD -MF`), so the graph stays current as includes change, and headers it newly includes are watched from then on.
+- `-MM` leaves out system headers, so `/usr/include` is never watched.
 
 ### 5.3 Recompiling
 1. Affected set = the changed `.cpp` file itself, or every TU whose include set contains the changed header.
@@ -280,6 +281,7 @@ Changes to struct layout behind pointers can't be seen from symbols. In M4, HotP
   - Linux: the main executable's TLS block offsets are fixed at load time, from `PT_TLS` and the static TLS layout (x86-64 variant II). The host computes each thread-pointer offset from the symbol's `st_value` and the TLS segment size and alignment.
   - Windows: `_tls_index` resolves to the executable's own symbol, and `SECREL` relocations resolve to the variable's offset in the executable's `.tls` section. The `gs:[0x58][_tls_index]` access pattern then reaches the existing per-thread blocks.
 - **New TLS variables** would need every existing thread's TLS block to grow. That isn't supported in v1 and is reported as restart required.
+- Implemented on Linux: `.tdata`/`.tbss` sections of a patch bind to the old variables like other data (by section). The thread-pointer offset is `st_value − round_up(PT_TLS.memsz, PT_TLS.align)`. All four static and dynamic access models are supported: local-exec (`TPOFF32`), initial-exec (`GOTTPOFF`, a GOT slot holding the offset), and general and local dynamic (`TLSGD`/`TLSLD`, a GOT pair `{module 1, offset}` for `__tls_get_addr`). TLS descriptors (`-mtls-dialect=gnu2`) are rejected.
 
 ### 7.8 GCC function clones
 GCC creates internal clones (`foo.constprop.0`, `foo.isra.0`, `foo.part.0`, `foo.cold`). These need no special handling:
@@ -297,7 +299,7 @@ Old clones become unreachable except from frames already on the stack, which is 
 - **Sync-point mode (default).** The agent receives the package on its IPC thread and queues it. The patch applies inside the next `hotpp::sync_point()` call, typically at the top of the frame or main loop. Pre- and post-patch hooks run at a well-defined moment, on the thread that calls `sync_point`.
 - **Async mode** (`Config::async = true`). The patch applies immediately on the agent's IPC thread. Suited to apps without a natural loop.
 
-In both modes, all threads other than the one applying the patch are paused while code and patch sites are written.
+In both modes, all threads other than the one applying the patch are paused while the patch sites are written (§8.2). Async mode is planned for M4.
 
 ### 8.2 Pausing threads
 - **Windows:**
@@ -307,7 +309,10 @@ In both modes, all threads other than the one applying the patch are paused whil
   - Enumerate `/proc/self/task`, then send each thread a reserved real-time signal with `tgkill`. The handler is installed with `SA_RESTART`, and the agent picks a free signal at init.
   - The handler writes its RIP from `ucontext` into a per-thread slot, then waits on a futex until it is released.
   - Threads created during the pause are caught by re-enumerating until the set is stable.
-- **Safety check:** if any paused thread's RIP is inside a byte range about to be rewritten (an entry's 2 bytes or its padding), release all threads, back off for 1 ms and retry, up to N times.
+- **Safety check:** if any paused thread's RIP is inside a byte range about to be rewritten (an entry's 2 bytes or its padding), release all threads, back off for 1 ms and retry, up to 200 times.
+- The agent's own thread is never paused; it blocks all signals and never runs patched code. A thread that doesn't stop within 2 s (one that blocks real-time signals) makes the patch fail without changing anything.
+- After the sites are written, `membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE)` serializes every core running a thread of the process before the threads resume. That is the cross-modifying-code rule for x86.
+- Only the patch sites need the pause. New code and data, unwind tables and initializers are installed while the other threads keep running, because nothing can reach them until the sites exist.
 
 ### 8.3 Patch-site scheme
 The same scheme is used on both OSes, made possible by the padding flags in §4.
@@ -332,21 +337,25 @@ If a function is too small or has no padding, for example because it came from a
 5. Patch sites on existing code pages are the exception: they are made RWX for the write, then RX again. The agent's own code can share a page with a function being redirected, and making that page non-executable would crash the agent mid-write.
 
 ### 8.5 Unwind registration
-- **Linux:** the relocated `.eh_frame` of the patch is registered with `__register_frame` (libgcc/libunwind). Exceptions thrown through new code unwind correctly, including across a mix of old and new frames.
+- **Linux:** the relocated `.eh_frame` of the patch is registered with `__register_frame` (libgcc). Exceptions thrown through new code unwind correctly, including across a mix of old and new frames.
+  - The `.eh_frame` sections of all patch objects are placed back to back, because an FDE finds its CIE by relative offset. A 4-byte zero terminator follows them.
+  - FDEs of a duplicate COMDAT copy point at the kept copy's code, so the duplicates are harmless.
+  - `__register_frame` is referenced weakly. LLVM's libunwind registers single FDEs through the same name, so a program using it would need per-FDE registration (not done).
 - **Windows:** the relocated `.pdata` (`RUNTIME_FUNCTION[]`) is registered with `RtlAddFunctionTable(pdata, count, patch __ImageBase)`.
 
 ### 8.6 Dynamic initializers
 A patch TU contains dynamic initializers for its globals: `.init_array` entries on ELF, `.CRT$XCU` on COFF. Running them as they are would re-initialize globals bound to old storage and reset state. Not running them would leave *new* globals uninitialized.
 
-**Shadow storage:**
-1. The host finds *initializer code*: functions reachable by call-graph walk (through relocations) from the init entries. Examples: `_GLOBAL__sub_I_*`, `__cxx_global_var_init*`, GCC's `__static_initialization_and_destruction_*`, MSVC `??__E*`.
-2. Inside initializer code only, data relocations are bound to **fresh shadow copies** of every data symbol the patch defines, whether old or new.
-3. The agent runs the initializers after the patch code is mapped but *before* patch sites are written. No thread can reach new code that way until new globals are initialized. `__cxa_atexit` / `atexit` / `_onexit` are interposed during the run, which records destructor registrations against shadow storage.
-4. Commit:
-   - for **new** symbols, the shadow *is* the storage; their recorded destructors are forwarded to the real `atexit`
-   - for **existing** symbols, the shadow and its destructor registrations are discarded
+**Shadow storage** (as implemented):
+1. The host finds *initializer code*: each `.init_array` entry plus the compiler-generated helpers it reaches through relocations. Helpers are recognised by name (`_GLOBAL__sub_I_*`, `__cxx_global_var_init*`, `__static_initialization_and_destruction_*`, `__tcf_*`, `__dtor_*`, `__cxx_global_array_dtor*`). User functions an initializer calls are *not* initializer code: they run normally against the real variables.
+2. **An initializer only runs if it sets up a new variable** (its code refers to a writable section loaded new). Editing a file whose globals all exist runs nothing, so no constructor or side effect repeats.
+3. When it does run, its references to this file's *existing* writable variables go to **scratch copies** of their sections, laid out in the patch's data. The copies are initialized from the object (`.data` contents, `.bss` zeros), and the real variables are untouched. That includes their guard variables, so template statics are rebuilt in the scratch copy too.
+4. The agent runs initializers after mapping the patch and registering its unwind tables, but *before* any patch site is written. Nothing can reach the new code until the new globals are initialized. An exception escaping an initializer fails the patch.
+5. Scratch copies are never freed. Their destructors registered via `__cxa_atexit` run at exit and destroy the scratch copies, which keeps construction and destruction paired; no interposition is needed.
 
-**Known limitation.** Side effects other than writing the global itself run again. Examples are self-registration into factories or test registries, logging and I/O. Mitigations:
+GCC folds all of a file's initializers into one function and Clang calls them all from one entry, so adding one dynamically initialized global re-runs the initializers of that file's other globals, into scratch copies. The host says so in a note.
+
+**Known limitation.** In that case side effects other than writing the global itself run again. Examples are self-registration into factories or test registries, logging and I/O. Planned mitigations (M4):
 - the `HOTPP_NO_REINIT` macro marks an initializer to skip on patch
 - post-patch hooks can deduplicate registrations
 
@@ -442,20 +451,20 @@ Defining `HOTPP_DISABLE` turns the whole API into inline no-ops for shipping bui
 | **M0** | Skeleton: CMake, `hotpp_enable`, agent and host binaries, IPC handshake, region reservation, sample app on Linux and Windows | The host prints the module list and reserved regions of the connected sample on both OSes. |
 | **M1** | Linux MVP (GCC + Clang): compile DB, `.cpp`-only changes, ELF object loader, `.symtab` index, binding policy, stubs and GOT, patch sites, sync-point mode | Editing a function body in the sample changes behaviour live while a global counter keeps counting. |
 | **M2** | Windows MVP (MSVC + clang-cl): spike on PDB internal-symbol matching first; then COFF loader, PDB index, `__ImageBase`, `.pdata` registration | Same demo as M1 on Windows. |
-| **M3** | Correctness: dependency graph and header edits, several TUs per patch, repeated patches, shadow initializers, local statics, existing TLS, unwinding and RTTI across patches, thread pausing, restart-required checks | The full e2e suite (§12) passes on all four toolchains at `-O0` and `-O2`. |
+| **M3** | Correctness: dependency graph and header edits, several TUs per patch, repeated patches, shadow initializers, local statics, existing TLS, unwinding and RTTI across patches, thread pausing, restart-required checks | The full e2e suite (§12) passes with GCC and Clang at `-O0` and `-O2`. (Originally all four toolchains; the Windows half moves with M2, which is deferred until a Windows machine is available.) |
 | **M4** | Usability: GDB JIT debug info, Windows debug research, hooks, async mode, dependency caching, layout-change warnings, polished console output | You can step through patched code in gdb; a decision on Windows debug support is recorded. |
 | **M5** | Extended: patching `.so`/`.dll` modules, hot restart, injecting into an app without the agent, ARM64 | Scoped separately. |
 
 Each milestone ends with a git commit, pushed to the Gitea remote, once its "done when" condition is met, for example `M1: Linux MVP`.
 
-**Known limits after M1** (each is planned for M3 unless noted):
-- Only `.cpp` edits are patched; header edits are reported and ignored.
-- Dynamic initializers in a patch don't run, so a *new* global that needs one starts zeroed.
-- `.eh_frame` isn't registered yet. An exception thrown through new code can't unwind and ends in `std::terminate`.
-- `thread_local` variables, new or existing, make a patch fail with "restart required".
-- Other threads aren't paused while patch sites are written. Applying patches only in `sync_point()` keeps this safe for code that just the calling thread runs.
+**Known limits after M3:**
+- Changing the layout of a struct or class that live objects use isn't detected. Old objects keep the old layout, and new code would misread them (M4 adds a warning from debug type info).
+- Adding a dynamically initialized global re-runs the initializers of that file's other globals into scratch copies, repeating their side effects (§8.6).
+- New `thread_local` variables, and resized or retyped globals, are rejected with "restart required".
 - A new direct reference to a shared-library *variable* (GCC with `-fPIE` emits these when the executable has no copy) is rejected with "restart required".
-- Windows processes connect but aren't patched (M2).
+- `__attribute__((destructor))` functions in a patch aren't registered.
+- Threads that block real-time signals can't be paused, so patches fail while they exist.
+- Only the main executable is patched (M5); Windows processes connect but aren't patched (M2).
 
 ---
 
@@ -467,36 +476,35 @@ Each milestone ends with a git commit, pushed to the Gitea remote, once its "don
 - Patch-site encoder tests, covering displacement calculation and the CET offset.
 
 ### End-to-end harness
-Each case is a directory `tests/e2e/<case>/` containing `v1/`, `v2/` and `expect.txt`. The harness:
-1. builds the app from `v1/` with `hotpp_enable`
-2. launches it
-3. waits for the agent handshake
-4. copies `v2/` sources over `v1/`
-5. waits for `PatchResult`
-6. checks the app's reported output against `expect.txt`
+Each case is a directory `tests/e2e/cases/<case>/` with:
+- `main.cpp`: never edited; implements `case_setup` / `case_frame` / `case_finish` from `tests/e2e/common/e2e.h`
+- `v1/`: the sources the program is built from
+- further version directories
+- `case.json`: the steps
 
-The test app reports over stdout, one line per sync point.
+CMake builds each program from *copies* of `v1/` in the build tree, with `hotpp_enable`. `tests/e2e/run_case.py` then:
+1. starts the program under `hotpp --`
+2. waits for the dependency scan and a few frames
+3. for each step, copies the step's files over the build-tree copies and waits for the host line the step expects (`patch N applied`, `restart required: …`, `failed to compile`), then a few more frames
+4. creates a stop file
+
+The program checks its invariants on every frame (state never resets, old and new results never mix) and its final state at the end, and prints `PASS`. The copies are restored to v1, content and timestamps, so the next build doesn't recompile.
 
 | Case | Checks |
 |---|---|
-| `body_change` | A changed function body takes effect. |
-| `new_function` | A new function called from patched code works. |
-| `global_state` | Globals keep their values across the patch. |
-| `local_static` | Function-local statics keep their values and don't re-run their initializers. |
-| `new_global` | A new global with a dynamic initializer is initialized; existing ones aren't reset. |
-| `header_inline` | Editing an inline function in a header updates every caller. |
-| `virtual_change` | Existing objects call the new body of a virtual function. |
-| `lambda_template` | Lambda bodies and template instantiations update. |
-| `fn_pointer` | A function pointer stored before the patch calls the new code. |
-| `exceptions` | An exception thrown in new code is caught in an old frame and vice versa; RTTI matches. |
-| `thread_spin` | A thread busy in a hot loop during the patch keeps running and picks up the new code. |
-| `repeat_x3` | Three consecutive patches to the same function; pointers from every stage reach the newest. |
-| `tls_existing` | Existing `thread_local` values are kept on every thread. |
+| `state` | A changed body takes effect; a new function and variable work; a global, a file `static`, an anonymous-namespace variable and a function-local static keep their values; a function pointer taken before the patch reaches the new code. |
+| `new_global` | New globals with dynamic initializers (plain and with a constructor) are initialized; existing dynamically initialized ones keep their state. |
+| `header_inline` | Editing an inline function and a template in a header recompiles both including files into one patch. |
+| `virtual_change` | Objects created before and after the patch run the new virtual function; `dynamic_cast` still works. |
+| `lambda_template` | Lambda bodies and template instantiations update, including a `std::function` that captured the old lambda. |
+| `exceptions` | New code throws and old code catches; old code throws and new code catches; unwinding through a new frame works. |
+| `thread_spin` | A thread calling the patched function in a tight loop keeps running and picks up the new code. |
+| `repeat` | Three consecutive patches; a pointer from the start reaches the newest version. |
+| `tls` | Existing `thread_local` variables (global and `static`) keep their values on the main thread and on a second thread. |
+| `restart_required` | A resized global and a new `thread_local` are rejected without touching the program; a valid change afterwards applies. |
 | `compile_error` | A broken edit applies nothing; the fix applies afterwards. |
-| `global_resize` | Changing a global's size is rejected with restart required. |
-| `new_tls` | Adding a `thread_local` is rejected with restart required. |
 
-**Matrix:** {Linux GCC, Linux Clang, Windows MSVC, Windows clang-cl} × {`-O0`, `-O2`}. CI uses Gitea Actions. Windows runner availability is open (§13).
+**Matrix:** {Linux GCC, Linux Clang, Windows MSVC, Windows clang-cl} × {`-O0`, `-O2`}. The Linux half runs today (`Debug` and `Release` builds of each compiler); the Windows half waits for M2. CI uses Gitea Actions. Windows runner availability is open (§13).
 
 Until a Windows machine or runner is set up, the Windows code is cross-compiled with MinGW (`cmake/toolchains/mingw-w64.cmake`) and its tests run under Wine. That covers the OS layer (pipes, process spawning, `VirtualAlloc` placement), but not MSVC-specific behaviour. MinGW binaries built with `-fpatchable-function-entry` fail at startup, so `hotpp_enable` leaves that flag out for MinGW and warns that the target can't be patched.
 

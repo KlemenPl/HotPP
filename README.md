@@ -2,7 +2,7 @@
 
 Hot reload for C++ on Linux and Windows. Edit a source file and the running program picks up the new code without restarting, keeping its state. It works like Live++: changed translation units are recompiled with their original commands and linked against the running process, and the old functions are redirected to the new ones.
 
-**Status:** M1. Editing a `.cpp` file of a running Linux program (GCC or Clang) patches it live: changed functions are replaced, globals and statics keep their values. Headers, exceptions through patched code, `thread_local` and Windows come in later milestones; see [docs/DESIGN.md](docs/DESIGN.md) §11 for the roadmap and current limits.
+**Status:** M3, Linux (GCC and Clang). Saving a `.cpp` file or a header of a running program patches it live. Changed functions are replaced, and globals, statics and `thread_local`s keep their values. New globals get initialized, and exceptions, virtual calls, lambdas and threads work across old and new code. Windows support (M2) is deferred. See [docs/DESIGN.md](docs/DESIGN.md) §11 for the roadmap and current limits.
 
 ## Build
 

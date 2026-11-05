@@ -1,0 +1,11 @@
+{
+  "steps": [
+    {
+      "name": "add dynamically initialized globals",
+      "copy": {
+        "game.cpp": "v2/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied"
+    }
+  ]
+}

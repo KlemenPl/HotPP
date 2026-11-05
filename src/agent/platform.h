@@ -31,6 +31,19 @@ void flush_icache(uint64_t addr, uint64_t size);
 // Address of an exported symbol in any loaded module (default version), or 0.
 uint64_t resolve_symbol(const std::string& name);
 
+// Makes the unwinder aware of a zero-terminated .eh_frame block. False if the
+// runtime offers no way to do so.
+bool register_unwind_info(uint64_t eh_frame);
+
+// The calling thread is the agent's own; it is never paused.
+void mark_agent_thread();
+// Stops every other thread of the process (except the agent thread) and reports
+// where each one stopped. On failure nothing stays paused.
+bool pause_other_threads(std::vector<uint64_t>& stopped_at, std::string& error);
+void resume_other_threads();
+// After modifying code other threads may run: serialize every core (no-op if unsupported).
+void sync_cores();
+
 // Byte stream to the host. send/recv transfer exactly `size` bytes or fail.
 Connection* ipc_connect(const std::string& endpoint);
 bool ipc_send(Connection* c, const void* data, size_t size);

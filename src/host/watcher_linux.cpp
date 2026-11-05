@@ -20,7 +20,7 @@ public:
     explicit InotifyWatcher(int fd) : fd_(fd) {}
     ~InotifyWatcher() override { ::close(fd_); }
 
-    bool add(const std::filesystem::path& dir, std::string& error) {
+    bool add(const std::filesystem::path& dir, std::string& error) override {
         // IN_CLOSE_WRITE: written in place. IN_MOVED_TO: saved via rename (most editors).
         int wd = inotify_add_watch(fd_, dir.c_str(), IN_CLOSE_WRITE | IN_MOVED_TO);
         if (wd < 0) {

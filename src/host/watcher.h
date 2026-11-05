@@ -18,6 +18,8 @@ public:
     // steps). Returns the changed files, normalized; empty on timeout.
     virtual std::vector<std::filesystem::path> wait(std::chrono::milliseconds timeout,
                                                     std::chrono::milliseconds quiet) = 0;
+    // Watches one more directory. Call from the thread that calls wait().
+    virtual bool add(const std::filesystem::path& dir, std::string& error) = 0;
 };
 
 // nullptr (with `error` set) if watching isn't possible.

@@ -14,7 +14,7 @@
 namespace hotpp::proto {
 
 constexpr uint32_t kMagic = 0x50544F48; // "HOTP"
-constexpr uint16_t kVersion = 2;
+constexpr uint16_t kVersion = 3;
 constexpr size_t kHeaderSize = 12;
 constexpr uint32_t kMaxPayload = 1u << 30;
 

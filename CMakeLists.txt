@@ -36,7 +36,7 @@ if(WIN32)
     target_sources(hotpp_agent PRIVATE src/agent/platform_win.cpp)
     target_link_libraries(hotpp_agent PRIVATE psapi)
 else()
-    target_sources(hotpp_agent PRIVATE src/agent/platform_linux.cpp)
+    target_sources(hotpp_agent PRIVATE src/agent/platform_linux.cpp src/agent/threads_linux.cpp)
     target_link_libraries(hotpp_agent PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
@@ -55,6 +55,7 @@ if(HOTPP_BUILD_HOST)
     # Everything but main(), so unit tests can link the host code.
     add_library(hotpp_host_lib STATIC
         src/host/compile_db.cpp
+        src/host/deps.cpp
         src/host/session.cpp
         src/host/elf/elf_file.cpp
         src/host/image/dwarf.cpp

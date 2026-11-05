@@ -1,8 +1,7 @@
-// Version 1 of the patched file. Each kind of state the patch must keep:
-int counter = 0;            // global
-static int tick_count = 0;  // file-local
+int counter = 0;
+static int tick_count = 0;
 namespace {
-int call_count = 0;         // anonymous namespace
+int call_count = 0;
 }
 
 void update() {
@@ -11,7 +10,7 @@ void update() {
 }
 
 int value() {
-    static int local_calls = 0; // function-local static
+    static int local_calls = 0;
     ++local_calls;
     ++call_count;
     return local_calls == call_count ? 1 : -1;

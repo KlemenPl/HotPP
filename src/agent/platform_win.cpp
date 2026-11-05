@@ -134,6 +134,16 @@ void flush_icache(uint64_t addr, uint64_t size) {
     FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(uintptr_t(addr)), SIZE_T(size));
 }
 
+// Windows processes are not patched yet (M2); these keep the agent linking.
+bool register_unwind_info(uint64_t) { return false; }
+void mark_agent_thread() {}
+bool pause_other_threads(std::vector<uint64_t>& stopped_at, std::string&) {
+    stopped_at.clear();
+    return true;
+}
+void resume_other_threads() {}
+void sync_cores() {}
+
 uint64_t resolve_symbol(const std::string& name) {
     for (const proto::ModuleRecord& m : enumerate_modules()) {
         HMODULE h = reinterpret_cast<HMODULE>(uintptr_t(m.base));

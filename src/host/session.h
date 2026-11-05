@@ -4,6 +4,7 @@
 
 #include "common/messages.h"
 #include "host/compile_db.h"
+#include "host/deps.h"
 #include "host/image/elf_image.h"
 #include "host/link/symbol_index.h"
 #include "host/platform.h"
@@ -45,6 +46,8 @@ private:
 
     void start_hot_reload();
     void watch_loop();
+    void watch_headers();
+    bool changed(const std::filesystem::path& file); // content differs from the last time we looked
     void handle_changes(const std::vector<std::filesystem::path>& files);
     std::vector<uint64_t> resolve_external(const std::vector<std::string>& names);
     std::optional<proto::PatchResult> wait_for_result(uint32_t id);
@@ -63,6 +66,12 @@ private:
     std::set<std::filesystem::path> units_; // sources the executable was built from
     std::unordered_map<std::string, size_t> content_hash_;
     std::unique_ptr<FileWatcher> watcher_;
+    std::set<std::filesystem::path> watched_dirs_;
+    DependencyGraph graph_;
+    std::thread scan_thread_;
+    std::mutex scan_mutex_;
+    std::condition_variable scan_cv_;
+    std::atomic<bool> scan_done_{false};
     std::filesystem::path patch_dir_;
     uint64_t region_cursor_ = 0;
     uint64_t region_end_ = 0;

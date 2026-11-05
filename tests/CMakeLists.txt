@@ -11,6 +11,7 @@ add_test(NAME unit COMMAND hotpp_unit_tests)
 if(TARGET hotpp_host_lib)
     target_sources(hotpp_unit_tests PRIVATE
         unit/compile_db_test.cpp
+        unit/deps_test.cpp
         unit/json_test.cpp
         unit/patch_site_test.cpp)
     target_link_libraries(hotpp_unit_tests PRIVATE hotpp_host_lib)
@@ -38,20 +39,36 @@ if(TARGET hotpp AND TARGET hotpp_example_basic)
         FAIL_REGULAR_EXPRESSION "OUT OF RANGE;handshake .* failed")
 endif()
 
-# End to end: patch a running program and check its state survives.
+# End to end: each case under e2e/cases runs under the host while run_case.py
+# swaps in newer versions of its sources; see e2e/run_case.py.
 find_package(Python3 COMPONENTS Interpreter)
 if(TARGET hotpp AND Python3_Interpreter_FOUND AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # The program is built from a copy in the build tree, which the test swaps for v2.
-    set(case_dir ${CMAKE_CURRENT_BINARY_DIR}/e2e/live_patch)
-    configure_file(e2e/live_patch/game_v1.cpp ${case_dir}/game.cpp COPYONLY)
-    add_executable(hotpp_e2e_live_patch e2e/live_patch/main.cpp ${case_dir}/game.cpp)
-    hotpp_enable(hotpp_e2e_live_patch)
-    add_test(NAME e2e_live_patch
-        COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_patch_case.py
-            --host $<TARGET_FILE:hotpp>
-            --exe $<TARGET_FILE:hotpp_e2e_live_patch>
-            --source ${case_dir}/game.cpp
-            --v1 ${CMAKE_CURRENT_SOURCE_DIR}/e2e/live_patch/game_v1.cpp
-            --v2 ${CMAKE_CURRENT_SOURCE_DIR}/e2e/live_patch/game_v2.cpp)
-    set_tests_properties(e2e_live_patch PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+    function(hotpp_e2e_case name)
+        set(src ${CMAKE_CURRENT_SOURCE_DIR}/e2e/cases/${name})
+        set(work ${CMAKE_CURRENT_BINARY_DIR}/e2e/${name})
+        # The program is built from copies in the build tree, which the test edits.
+        file(GLOB v1_files RELATIVE ${src}/v1 CONFIGURE_DEPENDS ${src}/v1/*)
+        set(sources ${src}/main.cpp ${CMAKE_CURRENT_SOURCE_DIR}/e2e/common/e2e_main.cpp)
+        foreach(f IN LISTS v1_files)
+            configure_file(${src}/v1/${f} ${work}/${f} COPYONLY)
+            if(f MATCHES "\\.cpp$")
+                list(APPEND sources ${work}/${f})
+            endif()
+        endforeach()
+        add_executable(hotpp_e2e_${name} ${sources})
+        target_include_directories(hotpp_e2e_${name} PRIVATE ${work} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/common)
+        target_link_libraries(hotpp_e2e_${name} PRIVATE Threads::Threads)
+        hotpp_enable(hotpp_e2e_${name})
+        add_test(NAME e2e_${name}
+            COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_case.py
+                --host $<TARGET_FILE:hotpp> --exe $<TARGET_FILE:hotpp_e2e_${name}>
+                --case ${src} --work ${work})
+        set_tests_properties(e2e_${name} PROPERTIES TIMEOUT 180)
+    endfunction()
+
+    foreach(case
+            state new_global header_inline virtual_change lambda_template exceptions
+            thread_spin repeat tls restart_required compile_error)
+        hotpp_e2e_case(${case})
+    endforeach()
 endif()

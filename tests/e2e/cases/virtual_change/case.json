@@ -1,0 +1,11 @@
+{
+  "steps": [
+    {
+      "name": "change Square::area",
+      "copy": {
+        "shapes.cpp": "v2/shapes.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied"
+    }
+  ]
+}

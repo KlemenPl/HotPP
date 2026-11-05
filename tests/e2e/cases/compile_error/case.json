@@ -1,0 +1,18 @@
+{
+  "steps": [
+    {
+      "name": "broken edit",
+      "copy": {
+        "game.cpp": "broken/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 not applied: game\\.cpp failed to compile"
+    },
+    {
+      "name": "fix it",
+      "copy": {
+        "game.cpp": "v2/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 2 applied"
+    }
+  ]
+}

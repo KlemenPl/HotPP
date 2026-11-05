@@ -1,0 +1,11 @@
+{
+  "steps": [
+    {
+      "name": "change work() while a thread spins on it",
+      "copy": {
+        "work.cpp": "v2/work.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied"
+    }
+  ]
+}

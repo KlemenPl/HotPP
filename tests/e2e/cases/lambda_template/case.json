@@ -1,0 +1,11 @@
+{
+  "steps": [
+    {
+      "name": "change the lambda and the template",
+      "copy": {
+        "logic.cpp": "v2/logic.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied"
+    }
+  ]
+}

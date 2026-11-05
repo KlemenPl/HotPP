@@ -1,0 +1,25 @@
+{
+  "steps": [
+    {
+      "name": "patch 1",
+      "copy": {
+        "game.cpp": "v2/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied"
+    },
+    {
+      "name": "patch 2",
+      "copy": {
+        "game.cpp": "v3/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 2 applied"
+    },
+    {
+      "name": "patch 3",
+      "copy": {
+        "game.cpp": "v4/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 3 applied"
+    }
+  ]
+}

@@ -1,12 +1,10 @@
-// Version 2: value() changes, using a new function and a new variable. All the old
-// state must carry over untouched.
 int counter = 0;
 static int tick_count = 0;
 namespace {
 int call_count = 0;
 }
 
-static int bonus_base = 1; // new variable, initialized data
+static int bonus_base = 1;                // new variable
 static int bonus() { return bonus_base; } // new function
 
 void update() {

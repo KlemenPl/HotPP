@@ -79,6 +79,7 @@ bool recv_message(AgentState& s, Header& h, std::vector<uint8_t>& payload) {
 }
 
 void reader_main(void*) {
+    agent::mark_agent_thread();
     AgentState& s = state();
     Header h;
     std::vector<uint8_t> payload;

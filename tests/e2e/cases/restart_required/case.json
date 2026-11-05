@@ -1,0 +1,25 @@
+{
+  "steps": [
+    {
+      "name": "resize a global",
+      "copy": {
+        "game.cpp": "resized/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 not applied, restart required: size of counter"
+    },
+    {
+      "name": "add a thread_local",
+      "copy": {
+        "game.cpp": "new_tls/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 2 not applied, restart required: new thread_local"
+    },
+    {
+      "name": "valid change",
+      "copy": {
+        "game.cpp": "v2/game.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 3 applied"
+    }
+  ]
+}

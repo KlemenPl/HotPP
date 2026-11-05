@@ -66,6 +66,8 @@ struct Patch {
     uint32_t id = 0;
     std::vector<Segment> segments;
     std::vector<PatchSite> sites;
+    uint64_t eh_frame = 0;              // start of the patch's .eh_frame (zero-terminated), or 0
+    std::vector<uint64_t> initializers; // dynamic initializers to call, in order, before redirecting
 };
 
 struct PatchResult {
@@ -189,6 +191,9 @@ inline void encode(Writer& w, const Patch& m) {
         w.u8(s.entry_bytes[0]);
         w.u8(s.entry_bytes[1]);
     }
+    w.u64(m.eh_frame);
+    w.u32(uint32_t(m.initializers.size()));
+    for (uint64_t a : m.initializers) w.u64(a);
 }
 
 inline bool decode(Reader& r, Patch& m) {
@@ -215,6 +220,11 @@ inline bool decode(Reader& r, Patch& m) {
         s.entry_bytes[0] = r.u8();
         s.entry_bytes[1] = r.u8();
     }
+    m.eh_frame = r.u64();
+    uint32_t inits = r.u32();
+    if (!r.ok() || inits > r.remaining() / 8) return false;
+    m.initializers.resize(inits);
+    for (uint64_t& a : m.initializers) a = r.u64();
     return r.ok() && r.at_end();
 }
 

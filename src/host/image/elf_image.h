@@ -31,6 +31,9 @@ public:
     // Absolute source paths of the DWARF compile units; empty without debug info.
     const std::vector<std::filesystem::path>& compile_units() const { return compile_units_; }
     const std::string& dwarf_warning() const { return dwarf_warning_; }
+    // PT_TLS memsz rounded up to its alignment (x86-64 TLS variant II: the block sits
+    // right below the thread pointer). 0 if the executable has no TLS.
+    uint64_t tls_block_size() const { return tls_block_size_; }
 
     bool section_writable(uint32_t shndx) const;
     // Copies `n` bytes at link-time virtual address `vaddr` from the file. False if
@@ -43,6 +46,7 @@ private:
     std::vector<uint8_t> build_id_;
     std::vector<std::filesystem::path> compile_units_;
     std::string dwarf_warning_;
+    uint64_t tls_block_size_ = 0;
 };
 
 // Source paths (DW_AT_comp_dir joined with DW_AT_name) of every DWARF 4/5 compile

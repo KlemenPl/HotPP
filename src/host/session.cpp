@@ -1,9 +1,11 @@
 #include "host/session.h"
 
+#include "host/deps.h"
 #include "host/link/linker.h"
 #include "host/object/elf_object.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -112,7 +114,9 @@ Session::Session(std::unique_ptr<Stream> stream, HostOptions options)
 
 Session::~Session() {
     stop_ = true;
+    scan_cv_.notify_all();
     if (watch_thread_.joinable()) watch_thread_.join();
+    if (scan_thread_.joinable()) scan_thread_.join();
     if (!patch_dir_.empty()) {
         std::error_code ec;
         fs::remove_all(patch_dir_, ec);
@@ -207,7 +211,9 @@ Session::Outcome Session::run() {
     }
     reply_cv_.notify_all();
     stop_ = true;
+    scan_cv_.notify_all();
     if (watch_thread_.joinable()) watch_thread_.join();
+    if (scan_thread_.joinable()) scan_thread_.join();
     say("agent disconnected: pid " + std::to_string(hello_.pid));
     return outcome;
 }
@@ -234,52 +240,104 @@ void Session::start_hot_reload() {
             (image_->dwarf_warning().empty() ? "" : " (" + image_->dwarf_warning() + ")") +
             "; every file in compile_commands.json is treated as part of it");
 
-    std::set<fs::path> dirs;
-    size_t files = 0;
+    std::vector<const CompileCommand*> program;
     for (const CompileCommand& c : db_->entries()) {
         if (!units_.empty() && !units_.count(c.file)) continue;
         std::error_code ec;
         if (!fs::exists(c.file, ec)) continue;
-        dirs.insert(c.file.parent_path());
+        watched_dirs_.insert(c.file.parent_path());
         content_hash_[c.file.string()] = std::hash<std::string>()(read_file(c.file));
-        ++files;
+        program.push_back(&c);
     }
-    if (files == 0)
+    if (program.empty())
         throw std::runtime_error("none of the sources " + exe_name_ + " was built from are in " + hello_.compile_commands);
 
     std::string error;
-    watcher_ = watch_directories({dirs.begin(), dirs.end()}, error);
+    watcher_ = watch_directories({watched_dirs_.begin(), watched_dirs_.end()}, error);
     if (!watcher_) throw std::runtime_error(error);
 
-    patch_dir_ = fs::path(hello_.compile_commands).parent_path() / ".hotpp" / std::to_string(hello_.pid);
-    say("watching " + plural(files, "source file") + " of " + exe_name_ + " (" + plural(index_.size(), "symbol") +
-        " indexed)");
+    const fs::path build_dir = fs::path(hello_.compile_commands).parent_path();
+    patch_dir_ = build_dir / ".hotpp" / std::to_string(hello_.pid);
+    say("watching " + plural(program.size(), "source file") + " of " + exe_name_ + " (" +
+        plural(index_.size(), "symbol") + " indexed)");
+
+    // Which headers each source includes; header edits wait for this.
+    scan_thread_ = std::thread([this, program, cache = build_dir / ".hotpp" / "deps"] {
+        const auto started = Clock::now();
+        const size_t failed = scan_dependencies(program, cache, std::max(1u, std::thread::hardware_concurrency()),
+                                                graph_, &stop_);
+        {
+            std::lock_guard<std::mutex> lock(scan_mutex_);
+            scan_done_ = true;
+        }
+        scan_cv_.notify_all();
+        if (!stop_)
+            say("tracking " + plural(graph_.headers().size(), "header") + " (dependency scan took " + ms_since(started) +
+                (failed ? ", " + plural(failed, "source") + " failed to scan" : std::string()) + ")");
+    });
     watch_thread_ = std::thread([this] { watch_loop(); });
+}
+
+void Session::watch_headers() {
+    for (const fs::path& h : graph_.headers()) {
+        content_hash_.emplace(h.string(), std::hash<std::string>()(read_file(h)));
+        const fs::path dir = h.parent_path();
+        if (!watched_dirs_.insert(dir).second) continue;
+        std::string error;
+        if (!watcher_->add(dir, error)) say("warning: " + error);
+    }
 }
 
 void Session::watch_loop() {
     using namespace std::chrono_literals;
+    bool headers_watched = false;
     while (!stop_) {
+        if (!headers_watched && scan_done_) {
+            watch_headers();
+            headers_watched = true;
+        }
         const std::vector<fs::path> files = watcher_->wait(200ms, 100ms);
         if (!files.empty() && !stop_) handle_changes(files);
     }
 }
 
+bool Session::changed(const fs::path& file) {
+    const size_t h = std::hash<std::string>()(read_file(file));
+    auto [it, inserted] = content_hash_.emplace(file.string(), h);
+    if (inserted) return true;
+    if (it->second == h) return false; // saved without changes
+    it->second = h;
+    return true;
+}
+
 void Session::handle_changes(const std::vector<fs::path>& files) {
     const auto started = Clock::now();
     std::vector<const CompileCommand*> tus;
+    std::set<fs::path> picked;
+    auto add_tu = [&](const fs::path& file) {
+        const CompileCommand* cmd = db_->find(file);
+        if (!cmd || (!units_.empty() && !units_.count(cmd->file))) return; // another program's source
+        if (picked.insert(cmd->file).second) tus.push_back(cmd);
+    };
+
     for (const fs::path& f : files) {
-        const CompileCommand* cmd = db_->find(f);
-        if (!cmd) {
-            if (is_header(f)) say("ignoring change to " + f.filename().string() + ": header changes are supported from M3");
+        if (db_->find(f)) {
+            if (changed(f)) add_tu(f);
             continue;
         }
-        if (!units_.empty() && !units_.count(cmd->file)) continue; // another program's source
-        const size_t h = std::hash<std::string>()(read_file(cmd->file));
-        size_t& known = content_hash_[cmd->file.string()];
-        if (known == h) continue; // saved without changes
-        known = h;
-        tus.push_back(cmd);
+        if (!is_header(f) && !graph_.headers().count(f)) continue; // not something the program is built from
+        if (!scan_done_) {
+            say("waiting for the dependency scan to finish before applying the change to " + f.filename().string());
+            std::unique_lock<std::mutex> lock(scan_mutex_);
+            scan_cv_.wait(lock, [&] { return scan_done_ || stop_.load(); });
+            if (stop_) return;
+        }
+        const std::vector<fs::path> includers = graph_.includers(f);
+        if (includers.empty()) continue; // not included by this program
+        if (!changed(f)) continue;
+        size_t before = tus.size();
+        for (const fs::path& tu : includers) add_tu(tu);
+        say(f.filename().string() + " changed: recompiling " + plural(tus.size() - before, "file") + " that include it");
     }
     if (tus.empty()) return;
 
@@ -292,28 +350,60 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
         return;
     }
 
-    std::string names;
-    std::vector<std::unique_ptr<object::ElfObject>> objects;
-    for (size_t i = 0; i < tus.size(); ++i) {
-        const CompileCommand& cmd = *tus[i];
-        const std::string name = cmd.file.filename().string();
-        names += (names.empty() ? "" : ", ") + name;
-        const fs::path out = dir / (std::to_string(i) + "-" + cmd.file.stem().string() + ".o");
-        say("compiling " + name);
+    // Compile all affected sources in parallel.
+    struct Job {
+        const CompileCommand* cmd;
+        fs::path out, depfile;
         std::string output, error;
-        const int rc = run_capture(patch_compile_arguments(cmd, out), cmd.directory, output, error);
-        if (!output.empty()) std::fputs(output.c_str(), stdout);
-        if (rc != 0) {
-            say("patch " + std::to_string(id) + " not applied: " + (rc < 0 ? error : name + " failed to compile"));
-            return;
+        int rc = -1;
+    };
+    std::vector<Job> jobs(tus.size());
+    std::string names;
+    for (size_t i = 0; i < tus.size(); ++i) {
+        jobs[i].cmd = tus[i];
+        const std::string stem = std::to_string(i) + "-" + tus[i]->file.stem().string();
+        jobs[i].out = dir / (stem + ".o");
+        jobs[i].depfile = dir / (stem + ".d");
+        names += (names.empty() ? "" : ", ") + tus[i]->file.filename().string();
+    }
+    say("compiling " + names);
+    {
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> workers;
+        const unsigned n = std::min<unsigned>(unsigned(jobs.size()), std::max(1u, std::thread::hardware_concurrency()));
+        for (unsigned t = 0; t < n; ++t)
+            workers.emplace_back([&] {
+                for (size_t i; (i = next.fetch_add(1)) < jobs.size();) {
+                    Job& j = jobs[i];
+                    std::vector<std::string> args = patch_compile_arguments(*j.cmd, j.out);
+                    args.insert(args.end(), {"-MMD", "-MF", j.depfile.string()});
+                    j.rc = run_capture(args, j.cmd->directory, j.output, j.error);
+                }
+            });
+        for (std::thread& w : workers) w.join();
+    }
+    std::vector<std::unique_ptr<object::ElfObject>> objects;
+    bool failed = false;
+    for (Job& j : jobs) {
+        if (!j.output.empty()) std::fputs(j.output.c_str(), stdout);
+        if (j.rc != 0) {
+            say("patch " + std::to_string(id) + " not applied: " +
+                (j.rc < 0 ? j.error : j.cmd->file.filename().string() + " failed to compile"));
+            failed = true;
+            continue;
         }
+        // Keep the include graph current: the edit may have added or removed includes.
+        graph_.set(j.cmd->file, parse_depfile(read_file(j.depfile), j.cmd->directory));
+        if (failed) continue;
         try {
-            objects.push_back(object::ElfObject::load(out));
+            objects.push_back(object::ElfObject::load(j.out));
         } catch (const std::exception& e) {
             say("patch " + std::to_string(id) + " not applied: " + e.what());
-            return;
+            failed = true;
         }
     }
+    if (failed) return;
+    if (scan_done_) watch_headers(); // newly included headers
 
     link::LinkResult linked;
     try {
@@ -322,6 +412,7 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
         link::LinkOptions opt;
         opt.region_cursor = region_cursor_;
         opt.region_end = region_end_;
+        opt.tls_block_size = image_->tls_block_size();
         linked = link::link_patch(
             ptrs, index_, [this](const std::vector<std::string>& n) { return resolve_external(n); }, opt);
     } catch (const link::RestartRequired& e) {
@@ -348,9 +439,12 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
         return;
     }
     index_.apply(linked.delta);
-    say("patch " + std::to_string(id) + " applied in " + ms_since(started) + ": " + names + " (" +
-        plural(linked.functions_redirected, "function") + " replaced, " + std::to_string(linked.functions_new) +
-        " new, " + plural(linked.data_kept, "variable") + " kept, " + format_size(linked.bytes_used) + ")");
+    std::string summary = plural(linked.functions_redirected, "function") + " replaced, " +
+                          std::to_string(linked.functions_new) + " new, " + plural(linked.data_kept, "variable") +
+                          " kept";
+    if (linked.initializers_run) summary += ", " + plural(linked.initializers_run, "initializer") + " run";
+    say("patch " + std::to_string(id) + " applied in " + ms_since(started) + ": " + names + " (" + summary + ", " +
+        format_size(linked.bytes_used) + ")");
 }
 
 std::vector<uint64_t> Session::resolve_external(const std::vector<std::string>& names) {

@@ -43,6 +43,11 @@ std::unique_ptr<ElfImage> ElfImage::load(const std::filesystem::path& path) {
     }
 
     img->build_id_ = elf::build_id(f);
+    for (const Phdr& ph : f.segments())
+        if (ph.type == PT_TLS) {
+            const uint64_t align = ph.align ? ph.align : 1;
+            img->tls_block_size_ = (ph.memsz + align - 1) / align * align;
+        }
     try {
         img->compile_units_ = dwarf_compile_units(f);
     } catch (const ElfError& e) {
