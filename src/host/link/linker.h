@@ -30,9 +30,12 @@ struct LinkOptions {
     uint64_t region_cursor = 0; // first free byte of the patch region
     uint64_t region_end = 0;
     uint64_t page_size = 4096;
-    // Size of the executable's static TLS block (PT_TLS memsz rounded up to its
-    // alignment); thread-pointer offsets are symbol value minus this. 0: no TLS.
-    uint64_t tls_block_size = 0;
+    // The module's TLS, as the agent sees it: thread-pointer offset of its static
+    // block (thread-pointer offset of a variable = this + its st_value) and the
+    // module ID __tls_get_addr takes.
+    bool tls_static = false;
+    int64_t tls_offset = 0;
+    uint64_t tls_module_id = 0;
     // Also produce debugger objects (docs/DESIGN.md §9).
     bool debug_objects = true;
 };

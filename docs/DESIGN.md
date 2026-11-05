@@ -1,6 +1,6 @@
 # HotPP — Design
 
-Status: M0, M1, M3 and M4 implemented; M2 (Windows) dropped · Last updated: 2026-11-05
+Status: M0, M1, M3, M4 and M5.1 implemented; M2 (Windows) dropped · Last updated: 2026-11-05
 
 HotPP is a hot-reload tool for C++ on Linux (x86-64, GCC and Clang). You edit a `.cpp` file or a header, save it, and the running program picks up the new code, typically within a fraction of a second. It doesn't restart and doesn't lose state.
 
@@ -26,7 +26,7 @@ Global and heap state stays where it is.
 - LTO (`-flto`).
 - Changing the layout of a struct or class while instances of it exist. HotPP reports *restart required* where it can detect such a change, and warns where it can only suspect one (§7.6).
 - Attaching to a process that doesn't link `hotpp_agent` (M5).
-- Patching code in shared libraries other than the main executable (M5). Everything is already keyed by module.
+- Patching shared libraries the program `dlopen`s after it connected to the host.
 - Being a build system. HotPP uses the commands the real build recorded.
 
 ---
@@ -74,8 +74,8 @@ The core split is that **the host does all the hard work and the agent only maps
 
   A bug in this complex code crashes the host, never the app.
 - **`hotpp_agent`** is a small static library linked into the app (C++17, no RTTI or exceptions in its interface). Its jobs:
-  1. At `init`, reserve a large address range (default 512 MB) within ±2 GB of the main executable (§7.3).
-  2. Connect to the host, launching it if needed. Report the process ID, executable path, module list with load bases and build IDs, and the reserved range.
+  1. At `init`, reserve a large address range (default 512 MB) within ±2 GB of the main executable (§7.3). The host asks for another one next to each shared library it patches.
+  2. Connect to the host, launching it if needed. Report the process ID, executable path, the module list (load bases, build IDs, TLS module IDs and offsets) and the reserved range.
   3. Answer symbol lookups (`dlsym`) and apply patches (§8).
 
 Because the region is reserved up front, the host knows the final addresses before linking. Applying a patch is one message plus one symbol-lookup round trip.
@@ -96,7 +96,8 @@ The host listens and agents connect. One host serves any number of agents.
 | `Hello` | agent → host | pid, exe, compile_commands path, modules (base, span, path, build ID), patch regions |
 | `HelloAck` | host → agent | host pid and version |
 | `ResolveRequest` / `ResolveReply` | host ↔ agent | symbol names → addresses (`dlsym`) |
-| `Patch` | host → agent | segments, patch sites, `.eh_frame` address, initializers, debug objects |
+| `ReserveRequest` / `ReserveReply` | host ↔ agent | a patch region next to a given module |
+| `Patch` | host → agent | segments, patch sites, `.eh_frame` blocks, initializers, debug objects |
 | `PatchResult` | agent → host | id, ok, error |
 | `Log`, `Bye` | both | text for the user; orderly disconnect |
 
@@ -146,16 +147,24 @@ Header edits can recompile many TUs. That is the price of correctness: every TU 
 
 ---
 
-## 6. Executable symbol index
+## 6. Module symbol index
 
-The host indexes every symbol of the running executable, mapping identity key → runtime address, size, kind and writability. It is read once from the file on disk, plus the load bias the agent reports. Each applied patch adds to it (§7.5).
+The host patches every loaded module (the executable and shared libraries) that is built from sources in `compile_commands.json`:
+- Modules in system directories (`/lib`, `/usr/lib`, …) are skipped without being read.
+- Other modules are tracked if their DWARF compile units include a source in the compile database.
+- The executable is always tracked.
+
+Each tracked module gets its own symbol index, patch region and source set. A changed source is linked against every module built from it, and the results go out as one patch.
+
+Each index maps identity key → runtime address, size, kind and writability. It is read once from the module's file on disk, plus the load bias the agent reports. Each applied patch adds to it (§7.5).
 
 - **Identity key:** global symbols by mangled name; local symbols (`static`, anonymous namespace, lambdas in non-inline functions) by `(defining file, mangled name)`.
 - **Local scoping:** the linker groups local symbols after an `STT_FILE` symbol naming their source file, so `(file, symbol)` comes for free. Two locals with the same key (two files with the same base name both defining it) are marked *ambiguous*. Data bound to them is an error; functions are loaded new without redirecting.
 - **Runtime address:** load bias (`dl_iterate_phdr`) + `st_value`. TLS symbols keep their offset in the TLS template.
 - **Patch sites:** for every function, the host checks the file bytes around its entry for the expected padding (§8.3). Functions without it, for example from code built without the flags, are never redirected.
 - **Program membership:** the DWARF compile units (`DW_AT_name` joined with `DW_AT_comp_dir`; DWARF 4 and 5, including `strx` forms) list exactly the sources the executable was built from. Edits to other files in the same build are ignored instead of being patched in.
-- **Identity check:** the agent sends each module's GNU build ID as mapped in memory. If the executable on disk has a different one (rebuilt since the program started), the host refuses to patch, because its symbol table no longer describes the running code.
+- **Identity check:** the agent sends each module's GNU build ID as mapped in memory. If the file on disk has a different one (rebuilt since it was loaded), the host doesn't patch that module, because its symbol table no longer describes the running code. For the executable, that disables hot reload.
+- **Interposed variables:** a shared library's exported variables may not live in the library. A PIE executable that uses one gets its own copy (a *copy relocation*), and the dynamic linker binds the library's references to that copy. For every exported variable of a library, the host asks the agent (`dlsym`) where it really is and binds to that address.
 
 ---
 
@@ -194,7 +203,7 @@ For every symbol a patch defines that already exists in the index, the policy de
 A weak reference that stays unresolved becomes 0. Anything else unresolved is an error, and no patch is applied.
 
 ### 7.3 Memory placement
-- The agent reserves the region at `init` with `mmap(PROT_NONE, MAP_FIXED_NOREPLACE)`. It places the region in the closest free gap below the executable (from `/proc/self/maps`) such that every byte of it is within ±2 GB of every byte of the executable. If nothing fits below, it goes above, leaving 64 MB for the brk heap; if 512 MB doesn't fit at all, smaller sizes are tried.
+- The agent reserves the executable's region at `init`, and a library's region when the host asks (`ReserveRequest`), with `mmap(PROT_NONE, MAP_FIXED_NOREPLACE)`. It places the region in the closest free gap below the executable (from `/proc/self/maps`) such that every byte of it is within ±2 GB of every byte of the executable. If nothing fits below, it goes above, leaving 64 MB for the brk heap; if 512 MB doesn't fit at all, smaller sizes are tried.
 - The host allocates within the region with a bump pointer. Each patch gets page-aligned segments: code + stubs (RX), read-only data + GOT + `.eh_frame` (R), data + bss + scratch copies (RW).
 - Every rel32 reference between the patch and the executable reaches. Calls into shared libraries go through 14-byte stubs (`jmp *0(%rip)` + address). `GOTPCREL` loads use GOT slots in the patch.
 - Patch memory is never freed.
@@ -228,7 +237,11 @@ Before producing a patch, the host rejects changes it knows it can't apply, with
 
 ### 7.7 Thread-local storage
 - `.tdata`/`.tbss` sections of a patch bind to the existing variables like other data (per section).
-- The thread-pointer offset of an executable TLS variable is `st_value − round_up(PT_TLS.memsz, PT_TLS.align)` (x86-64 TLS variant II; the executable's block sits right below the thread pointer).
+- The agent reports each module's TLS layout as the process sees it:
+  - `dlpi_tls_modid`, the module ID `__tls_get_addr` takes
+  - for modules in static TLS (everything loaded at startup), the block's offset from the thread pointer (`dlpi_tls_data − %fs:0`)
+
+  The thread-pointer offset of a variable is that offset + its `st_value`. Library code built with `-fPIC` uses the general/local-dynamic models with the library's module ID.
 - Access models:
 
 | Model | Relocations | Handling |
@@ -402,7 +415,9 @@ Defining `HOTPP_DISABLE` turns the whole API into inline no-ops.
 | **M2** | Windows (MSVC, COFF/PDB) | — | dropped |
 | **M3** | Correctness: header edits, several TUs per patch, repeated patches, initializers, local statics, existing TLS, exceptions and RTTI across patches, thread pausing, restart-required checks | The e2e suite (§12) passes with GCC and Clang at `-O0` and `-O2`. | done |
 | **M4** | Usability: gdb JIT debug info, hooks, async mode, layout-change warnings, quieter console output | You can step through patched code in gdb (automated test). | done |
-| **M5** | Extended: patching shared libraries, hot restart, injecting into an app without the agent | Scoped separately. | — |
+| **M5.1** | Shared libraries: every module built from the project's sources is patched, with its own index and region | A `.so`'s globals (including copy-relocated ones), statics and `thread_local`s survive a patch; it can call back into the program (`shared_lib` case). | done |
+| **M5.2** | Hot restart: for changes that need a restart, rebuild with the user's build command and re-exec with the same command line | The program restarts on the new build from the host, without the user restarting it. | |
+| **M5.3** | Attach: inject the agent into a running program built with the flags but without the agent (ptrace + `dlopen`) | A running program not linked with the agent gets patched. | |
 
 Each milestone ends with a git commit, pushed to the Gitea remote, once its "done when" condition is met.
 
@@ -413,7 +428,7 @@ Each milestone ends with a git commit, pushed to the Gitea remote, once its "don
 - New `thread_local` variables, resized or retyped globals, and new direct references to shared-library variables need a restart.
 - `__attribute__((destructor))` functions in a patch aren't registered.
 - Threads that block real-time signals can't be paused, so patches fail while such threads exist.
-- Only the main executable is patched (M5).
+- Shared libraries loaded with `dlopen` after the program connected aren't patched.
 
 ---
 
@@ -459,6 +474,7 @@ The program checks its invariants every frame (state never resets, old and new r
 | `hooks` | Pre/post-patch hooks run exactly once per patch; a changed hook body takes effect; a hook added by a patch is registered and runs. |
 | `async` | In async mode, a patch applies while the main thread spins in a loop that never reaches `sync_point()`. |
 | `layout_warning` | A struct that grows in a header triggers the layout warning, and the patch still applies. |
+| `shared_lib` | Code in a shared library (`lib_*.cpp` in the case) is patched: its global (copy-relocated into the executable), `static` and `thread_local` keep their values, and it calls back into the executable. |
 | `gdb_step` | Under gdb: a breakpoint in new code, locals and kept globals, a backtrace into old code, `finish` (§9). Runs only if gdb is installed. |
 
 **Matrix:** {GCC, Clang} × {Debug (`-O0`), Release (`-O2`)}, in four build directories. With gdb mode, `case.json` can also run the program under gdb (`"gdb": "<script>"`, `"expect_output": [...]`). `"env"` sets environment variables, and a step's `"expect"` may list several lines in order.

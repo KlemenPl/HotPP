@@ -97,6 +97,15 @@ int collect_module(dl_phdr_info* info, size_t, void* data) {
     // dl_iterate_phdr visits the main program first, with an empty name.
     m.path = modules.empty() ? executable_path() : (info->dlpi_name ? info->dlpi_name : "");
     m.build_id = build_id(info);
+    // TLS: dlpi_tls_data is this thread's copy of the module's block. For modules
+    // loaded at startup it's in static TLS, at a fixed offset from the thread pointer.
+    m.tls_module_id = info->dlpi_tls_modid;
+    if (info->dlpi_tls_data) {
+        uint64_t tp;
+        __asm__("mov %%fs:0, %0" : "=r"(tp));
+        m.tls_offset = int64_t(reinterpret_cast<uint64_t>(info->dlpi_tls_data) - tp);
+        m.tls_static = true;
+    }
     modules.push_back(std::move(m));
     return 0;
 }

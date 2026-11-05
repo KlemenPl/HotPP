@@ -49,12 +49,28 @@ private:
     bool send(proto::MsgType type, const proto::Writer& w);
     bool recv(proto::Header& h, std::vector<uint8_t>& payload);
 
+    // A loaded module (the executable or a shared library) built from sources in
+    // compile_commands.json, and everything needed to patch it.
+    struct ModuleState {
+        size_t index = 0; // into hello_.modules
+        std::string name;
+        std::unique_ptr<image::ElfImage> image;
+        link::SymbolIndex symbols;
+        std::set<std::filesystem::path> units; // sources it was built from
+        uint64_t cursor = 0, end = 0;          // its patch region
+        std::unordered_map<std::string, image::TypeLayout> layouts, pending_layouts;
+        bool layouts_ok = false;
+    };
+
     void start_hot_reload();
+    void setup_modules();
+    std::optional<proto::RegionRecord> reserve_region(uint32_t module_index, uint64_t size);
+    void bind_interposed_variables(ModuleState& module);
     void watch_loop();
     void watch_headers();
     bool changed(const std::filesystem::path& file); // content differs from the last time we looked
     void handle_changes(const std::vector<std::filesystem::path>& files);
-    void warn_layout_changes(const link::LinkResult& linked);
+    void warn_layout_changes(ModuleState& module, const link::LinkResult& linked);
     std::vector<uint64_t> resolve_external(const std::vector<std::string>& names);
     std::optional<proto::PatchResult> wait_for_result(uint32_t id);
     void say(const std::string& line) const;
@@ -67,9 +83,8 @@ private:
 
     // Hot reload state, owned by the watcher thread once started.
     std::optional<CompileDb> db_;
-    std::unique_ptr<image::ElfImage> image_;
-    link::SymbolIndex index_;
-    std::set<std::filesystem::path> units_; // sources the executable was built from
+    std::vector<std::unique_ptr<ModuleState>> modules_; // [0] is the executable
+    std::set<std::filesystem::path> units_;              // sources of all of them
     std::unordered_map<std::string, size_t> content_hash_;
     std::unique_ptr<FileWatcher> watcher_;
     std::set<std::filesystem::path> watched_dirs_;
@@ -78,14 +93,8 @@ private:
     std::mutex scan_mutex_;
     std::condition_variable scan_cv_;
     std::atomic<bool> scan_done_{false};
-    // Struct layouts of the running program, read after the dependency scan.
-    std::unordered_map<std::string, image::TypeLayout> layouts_;
-    std::unordered_map<std::string, image::TypeLayout> pending_layouts_; // adopted once a patch applies
-    bool layouts_ok_ = false;
-    std::atomic<bool> layouts_ready_{false};
+    std::atomic<bool> layouts_ready_{false}; // struct layouts read (after the dependency scan)
     std::filesystem::path patch_dir_;
-    uint64_t region_cursor_ = 0;
-    uint64_t region_end_ = 0;
     uint32_t next_patch_ = 1;
     uint32_t next_request_ = 1;
     std::thread watch_thread_;
@@ -96,6 +105,7 @@ private:
     std::condition_variable reply_cv_;
     std::map<uint32_t, proto::PatchResult> results_;
     std::map<uint32_t, proto::ResolveReply> resolved_;
+    std::map<uint32_t, proto::ReserveReply> reserved_;
     bool disconnected_ = false;
 };
 

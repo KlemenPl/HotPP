@@ -39,8 +39,9 @@ struct AgentState {
     std::mutex send_mutex;
     agent::Connection* conn = nullptr;
     agent::Thread* reader = nullptr;
+    std::mutex region_mutex;
     std::vector<RegionRecord> regions; // kept until process exit: patch code lives here
-    ModuleRecord main_module;
+    std::vector<ModuleRecord> modules; // as reported in the hello
     std::atomic<bool> connected{false};
     bool initialized = false;
 
@@ -108,12 +109,19 @@ bool recv_message(AgentState& s, Header& h, std::vector<uint8_t>& payload) {
     return h.size == 0 || agent::ipc_recv(s.conn, payload.data(), h.size);
 }
 
+bool reserve_regions(uint64_t requested, const ModuleRecord& module, std::vector<RegionRecord>& out);
+
 void apply_and_report(const Patch& patch) {
     AgentState& s = state();
     run_hooks(detail::HookKind::PrePatch);
     PatchResult result;
     result.id = patch.id;
-    result.error = agent::apply_patch(patch, s.regions, s.main_module);
+    std::vector<RegionRecord> regions;
+    {
+        std::lock_guard<std::mutex> lock(s.region_mutex);
+        regions = s.regions;
+    }
+    result.error = agent::apply_patch(patch, regions, s.modules);
     result.ok = result.error.empty();
     if (result.ok) run_hooks(detail::HookKind::PostPatch);
     else agent::log("patch %u failed: %s", unsigned(patch.id), result.error.c_str());
@@ -146,6 +154,24 @@ void reader_main(void*) {
             std::lock_guard<std::mutex> lock(s.queue_mutex);
             s.pending.push_back(std::move(patch));
             s.has_pending = true;
+        } else if (h.type == MsgType::ReserveRequest) {
+            ReserveRequest req;
+            if (!decode(r, req)) continue;
+            ReserveReply reply;
+            reply.id = req.id;
+            if (req.module_index < s.modules.size()) {
+                std::vector<RegionRecord> got;
+                if (reserve_regions(req.size, s.modules[req.module_index], got)) {
+                    reply.ok = true;
+                    reply.region = got[0];
+                    reply.region.module_index = req.module_index;
+                    std::lock_guard<std::mutex> lock(s.region_mutex);
+                    s.regions.push_back(reply.region);
+                }
+            }
+            Writer w;
+            encode(w, reply);
+            send_message(s, MsgType::ReserveReply, w);
         } else if (h.type == MsgType::ResolveRequest) {
             ResolveRequest req;
             if (!decode(r, req)) continue;
@@ -186,14 +212,12 @@ agent::Connection* connect_or_launch(const std::string& endpoint, const Config& 
     return nullptr;
 }
 
-// v1 patches only the main executable, so one region next to module 0. If the
-// requested size doesn't fit within reach, smaller sizes are tried.
-bool reserve_regions(uint64_t requested, const std::vector<ModuleRecord>& modules,
-                     std::vector<RegionRecord>& out) {
+// A region next to `module`. If the requested size doesn't fit within reach,
+// smaller sizes are tried.
+bool reserve_regions(uint64_t requested, const ModuleRecord& module, std::vector<RegionRecord>& out) {
     for (uint64_t size = requested; size >= kMinRegionSize; size /= 2) {
         RegionRecord region;
-        if (agent::reserve_near(modules[0], size, region)) {
-            region.module_index = 0;
+        if (agent::reserve_near(module, size, region)) {
             out.push_back(region);
             return true;
         }
@@ -230,13 +254,15 @@ bool init(const Config& cfg) {
         agent::log("could not enumerate loaded modules; hot reload disabled");
         return false;
     }
-    if (!reserve_regions(cfg.region_size, hello.modules, s.regions)) {
+    // The executable's region up front; the host asks for regions next to the
+    // shared libraries it patches.
+    if (!reserve_regions(cfg.region_size, hello.modules[0], s.regions)) {
         agent::log("could not reserve patch memory within 2 GiB of %s; hot reload disabled",
                    hello.exe.c_str());
         return false;
     }
     hello.regions = s.regions;
-    s.main_module = hello.modules[0];
+    s.modules = hello.modules;
 
     const std::string endpoint = pick(cfg.endpoint, "HOTPP_ENDPOINT", default_endpoint());
     s.conn = connect_or_launch(endpoint, cfg);

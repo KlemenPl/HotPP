@@ -53,7 +53,12 @@ SiteRange range_of(const PatchSite& s) {
 } // namespace
 
 std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& regions,
-                        const ModuleRecord& main_module) {
+                        const std::vector<ModuleRecord>& modules) {
+    auto in_modules = [&](uint64_t addr, uint64_t size) {
+        for (const ModuleRecord& m : modules)
+            if (inside(addr, size, m.start, m.size)) return true;
+        return false;
+    };
     const uint64_t page = page_size();
 
     for (const Segment& seg : patch.segments) {
@@ -63,8 +68,7 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
     }
     for (const PatchSite& site : patch.sites) {
         const SiteRange r = range_of(site);
-        if (!inside(r.lo, r.hi - r.lo, main_module.start, main_module.size) &&
-            !in_regions(r.lo, r.hi - r.lo, regions))
+        if (!in_modules(r.lo, r.hi - r.lo) && !in_regions(r.lo, r.hi - r.lo, regions))
             return at("patch site outside patchable code", site.entry_addr);
         const int64_t rel = int64_t(site.target - (site.pad_addr + 5));
         if (rel != int64_t(int32_t(rel))) return at("patch target out of rel32 range", site.target);
@@ -86,9 +90,9 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
     }
 
     // 2. Unwind tables, so exceptions can pass through the new code.
-    if (patch.eh_frame) {
-        if (!in_regions(patch.eh_frame, 4, regions)) return at("unwind table outside the patch region", patch.eh_frame);
-        if (!register_unwind_info(patch.eh_frame))
+    for (uint64_t frame : patch.eh_frames) {
+        if (!in_regions(frame, 4, regions)) return at("unwind table outside the patch region", frame);
+        if (!register_unwind_info(frame))
             log("warning: no __register_frame in this process; exceptions thrown through patched code will terminate");
     }
 

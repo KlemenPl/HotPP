@@ -42,6 +42,13 @@ const IndexEntry* SymbolIndex::find(const SymbolKey& key) const {
     return it == entries_.end() ? nullptr : &it->second;
 }
 
+bool SymbolIndex::rebind(const SymbolKey& key, uint64_t address) {
+    auto it = entries_.find(key.str());
+    if (it == entries_.end()) return false;
+    it->second.address = address;
+    return true;
+}
+
 void SymbolIndex::apply(const IndexDelta& delta) {
     for (const IndexDelta::NewVersion& v : delta.versions) {
         auto it = entries_.find(v.key.str());

@@ -46,10 +46,14 @@ if(TARGET hotpp AND Python3_Interpreter_FOUND)
         set(work ${CMAKE_CURRENT_BINARY_DIR}/e2e/${name})
         # The program is built from copies in the build tree, which the test edits.
         file(GLOB v1_files RELATIVE ${src}/v1 CONFIGURE_DEPENDS ${src}/v1/*)
+        # lib_*.cpp files go into a shared library the program links.
         set(sources ${src}/main.cpp ${CMAKE_CURRENT_SOURCE_DIR}/e2e/common/e2e_main.cpp)
+        set(lib_sources)
         foreach(f IN LISTS v1_files)
             configure_file(${src}/v1/${f} ${work}/${f} COPYONLY)
-            if(f MATCHES "\\.cpp$")
+            if(f MATCHES "^lib_.*\\.cpp$")
+                list(APPEND lib_sources ${work}/${f})
+            elseif(f MATCHES "\\.cpp$")
                 list(APPEND sources ${work}/${f})
             endif()
         endforeach()
@@ -57,6 +61,12 @@ if(TARGET hotpp AND Python3_Interpreter_FOUND)
         target_include_directories(hotpp_e2e_${name} PRIVATE ${work} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/common)
         target_link_libraries(hotpp_e2e_${name} PRIVATE Threads::Threads)
         hotpp_enable(hotpp_e2e_${name})
+        if(lib_sources)
+            add_library(hotpp_e2e_${name}_lib SHARED ${lib_sources})
+            target_include_directories(hotpp_e2e_${name}_lib PRIVATE ${work})
+            hotpp_enable(hotpp_e2e_${name}_lib)
+            target_link_libraries(hotpp_e2e_${name} PRIVATE hotpp_e2e_${name}_lib)
+        endif()
         add_test(NAME e2e_${name}
             COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_case.py
                 --host $<TARGET_FILE:hotpp> --exe $<TARGET_FILE:hotpp_e2e_${name}>
@@ -66,7 +76,8 @@ if(TARGET hotpp AND Python3_Interpreter_FOUND)
 
     foreach(case
             state new_global header_inline virtual_change lambda_template exceptions
-            thread_spin repeat tls restart_required compile_error hooks async layout_warning)
+            thread_spin repeat tls restart_required compile_error hooks async layout_warning
+            shared_lib)
         hotpp_e2e_case(${case})
     endforeach()
 

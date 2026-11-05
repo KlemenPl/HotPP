@@ -15,6 +15,9 @@ struct ModuleRecord {
     uint64_t size = 0;  // mapped span in bytes, page aligned
     std::string path;
     std::vector<uint8_t> build_id; // GNU build ID of the loaded image; empty if unknown
+    uint64_t tls_module_id = 0;    // TLS module ID (__tls_get_addr); 0: no TLS
+    int64_t tls_offset = 0;        // thread-pointer offset of its static TLS block, if tls_static
+    bool tls_static = false;
 };
 
 struct RegionRecord {
@@ -66,7 +69,7 @@ struct Patch {
     uint32_t id = 0;
     std::vector<Segment> segments;
     std::vector<PatchSite> sites;
-    uint64_t eh_frame = 0;              // start of the patch's .eh_frame (zero-terminated), or 0
+    std::vector<uint64_t> eh_frames;    // zero-terminated .eh_frame blocks to register
     std::vector<uint64_t> initializers; // dynamic initializers to call, in order, before redirecting
     std::vector<std::vector<uint8_t>> debug_objects; // relocated ELF objects for the debugger (§9)
 };
@@ -75,6 +78,18 @@ struct PatchResult {
     uint32_t id = 0;
     bool ok = false;
     std::string error;
+};
+
+struct ReserveRequest {
+    uint32_t id = 0;
+    uint32_t module_index = 0;
+    uint64_t size = 0;
+};
+
+struct ReserveReply {
+    uint32_t id = 0;
+    bool ok = false;
+    RegionRecord region;
 };
 
 struct ResolveRequest {
@@ -115,6 +130,9 @@ inline void encode(Writer& w, const Hello& m) {
         w.u64(mod.size);
         put(w, mod.path);
         put_bytes(w, mod.build_id);
+        w.u64(mod.tls_module_id);
+        w.u64(uint64_t(mod.tls_offset));
+        w.u8(mod.tls_static ? 1 : 0);
     }
     w.u32(uint32_t(m.regions.size()));
     for (const RegionRecord& reg : m.regions) {
@@ -125,7 +143,7 @@ inline void encode(Writer& w, const Hello& m) {
 }
 
 inline bool decode(Reader& r, Hello& m) {
-    constexpr size_t kModuleMin = 8 + 8 + 8 + 4 + 4;
+    constexpr size_t kModuleMin = 8 + 8 + 8 + 4 + 4 + 17;
     constexpr size_t kRegionMin = 8 + 8 + 4;
     m.pid = r.u32();
     m.platform = Platform(r.u8());
@@ -141,6 +159,9 @@ inline bool decode(Reader& r, Hello& m) {
         mod.size = r.u64();
         mod.path = get_string(r);
         mod.build_id = get_bytes(r);
+        mod.tls_module_id = r.u64();
+        mod.tls_offset = int64_t(r.u64());
+        mod.tls_static = r.u8() != 0;
     }
     uint32_t regions = r.u32();
     if (!r.ok() || regions > r.remaining() / kRegionMin) return false;
@@ -192,7 +213,8 @@ inline void encode(Writer& w, const Patch& m) {
         w.u8(s.entry_bytes[0]);
         w.u8(s.entry_bytes[1]);
     }
-    w.u64(m.eh_frame);
+    w.u32(uint32_t(m.eh_frames.size()));
+    for (uint64_t a : m.eh_frames) w.u64(a);
     w.u32(uint32_t(m.initializers.size()));
     for (uint64_t a : m.initializers) w.u64(a);
     w.u32(uint32_t(m.debug_objects.size()));
@@ -223,7 +245,10 @@ inline bool decode(Reader& r, Patch& m) {
         s.entry_bytes[0] = r.u8();
         s.entry_bytes[1] = r.u8();
     }
-    m.eh_frame = r.u64();
+    uint32_t frames = r.u32();
+    if (!r.ok() || frames > r.remaining() / 8) return false;
+    m.eh_frames.resize(frames);
+    for (uint64_t& a : m.eh_frames) a = r.u64();
     uint32_t inits = r.u32();
     if (!r.ok() || inits > r.remaining() / 8) return false;
     m.initializers.resize(inits);
@@ -245,6 +270,36 @@ inline bool decode(Reader& r, PatchResult& m) {
     m.id = r.u32();
     m.ok = r.u8() != 0;
     m.error = get_string(r);
+    return r.ok() && r.at_end();
+}
+
+inline void encode(Writer& w, const ReserveRequest& m) {
+    w.u32(m.id);
+    w.u32(m.module_index);
+    w.u64(m.size);
+}
+
+inline bool decode(Reader& r, ReserveRequest& m) {
+    m.id = r.u32();
+    m.module_index = r.u32();
+    m.size = r.u64();
+    return r.ok() && r.at_end();
+}
+
+inline void encode(Writer& w, const ReserveReply& m) {
+    w.u32(m.id);
+    w.u8(m.ok ? 1 : 0);
+    w.u64(m.region.base);
+    w.u64(m.region.size);
+    w.u32(m.region.module_index);
+}
+
+inline bool decode(Reader& r, ReserveReply& m) {
+    m.id = r.u32();
+    m.ok = r.u8() != 0;
+    m.region.base = r.u64();
+    m.region.size = r.u64();
+    m.region.module_index = r.u32();
     return r.ok() && r.at_end();
 }
 

@@ -561,8 +561,13 @@ private:
 
     uint64_t tpoff(const Target& t) const {
         if (t.kind != Target::Tls) throw LinkError("TLS access to a variable that isn't thread_local");
-        if (!opt_.tls_block_size) throw LinkError("the executable has no TLS segment");
-        return t.value - opt_.tls_block_size;
+        if (!opt_.tls_static) throw LinkError("the module's TLS isn't at a fixed offset from the thread pointer");
+        return t.value + uint64_t(opt_.tls_offset);
+    }
+
+    uint64_t tls_module() const {
+        if (!opt_.tls_module_id) throw LinkError("the module has no TLS segment");
+        return opt_.tls_module_id;
     }
 
     void plan_got_and_stubs() {
@@ -584,10 +589,10 @@ private:
             } else if (type == R_X86_64_TLSGD) {
                 const Target t = resolve_symbol(o, r.sym(), false, false);
                 if (t.kind != Target::Tls) throw LinkError("TLS access to a variable that isn't thread_local");
-                // tls_index {module 1 (the executable), offset} for __tls_get_addr.
-                got_slot("g" + std::to_string(t.value), {GotSlot{true, {}, 1}, GotSlot{true, {}, t.value}});
+                // tls_index {module ID, offset} for __tls_get_addr.
+                got_slot("g" + std::to_string(t.value), {GotSlot{true, {}, tls_module()}, GotSlot{true, {}, t.value}});
             } else if (type == R_X86_64_TLSLD) {
-                got_slot("l", {GotSlot{true, {}, 1}, GotSlot{true, {}, 0}});
+                got_slot("l", {GotSlot{true, {}, tls_module()}, GotSlot{true, {}, 0}});
             } else if (type == R_X86_64_GOTPC32_TLSDESC || type == R_X86_64_TLSDESC_CALL) {
                 throw LinkError(file_of(obj(o)) + " uses TLS descriptors (-mtls-dialect=gnu2), which are not supported");
             }
@@ -777,7 +782,7 @@ private:
                 put64(p, t.value + uint64_t(A));
                 break;
             }
-            case R_X86_64_DTPMOD64: put64(p, 1); break;
+            case R_X86_64_DTPMOD64: put64(p, tls_module()); break;
             default:
                 throw LinkError("unsupported relocation type " + std::to_string(type) + " in " + sec.name + " of " + file_of(ob));
             }
@@ -864,7 +869,7 @@ private:
         if (text_size_) out_.patch.segments.push_back({text_start_, text_size_, proto::kProtRead | proto::kProtExec, text_});
         if (ro_size_) out_.patch.segments.push_back({ro_start_, ro_size_, proto::kProtRead, ro_});
         if (data_size_) out_.patch.segments.push_back({data_start_, data_size_, proto::kProtRead | proto::kProtWrite, data_});
-        out_.patch.eh_frame = eh_frame_;
+        if (eh_frame_) out_.patch.eh_frames.push_back(eh_frame_);
         for (const Target& t : run_) out_.patch.initializers.push_back(address(t));
         out_.bytes_used = data_start_ + data_size_ - opt_.region_cursor;
     }

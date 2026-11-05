@@ -12,6 +12,6 @@ namespace hotpp::agent {
 // before the first byte is written; returns an empty string on success, otherwise
 // a description of the problem. Not thread safe: call with patched code quiescent.
 std::string apply_patch(const proto::Patch& patch, const std::vector<proto::RegionRecord>& regions,
-                        const proto::ModuleRecord& main_module);
+                        const std::vector<proto::ModuleRecord>& modules);
 
 } // namespace hotpp::agent

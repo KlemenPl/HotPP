@@ -66,6 +66,9 @@ public:
     // Adds one symbol; an existing local with the same key becomes ambiguous.
     void add(const SymbolKey& key, const IndexEntry& entry);
     const IndexEntry* find(const SymbolKey& key) const;
+    // Points an existing variable at different storage (where the dynamic linker
+    // actually bound it). False if there is no such entry.
+    bool rebind(const SymbolKey& key, uint64_t address);
     void apply(const IndexDelta& delta);
     size_t size() const { return entries_.size(); }
 

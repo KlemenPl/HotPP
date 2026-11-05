@@ -28,6 +28,9 @@ In your CMake project:
 add_subdirectory(HotPP)
 add_executable(game main.cpp)
 hotpp_enable(game)   # links the agent and sets the required compiler/linker flags
+
+add_library(engine SHARED engine.cpp)
+hotpp_enable(engine) # libraries get the flags; the program's agent patches them
 ```
 
 In your program:

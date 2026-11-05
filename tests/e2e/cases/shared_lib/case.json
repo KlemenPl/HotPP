@@ -1,0 +1,11 @@
+{
+  "steps": [
+    {
+      "name": "change code in the shared library",
+      "copy": {
+        "lib_plugin.cpp": "v2/lib_plugin.cpp"
+      },
+      "expect": "^\\[hotpp\\] patch 1 applied"
+    }
+  ]
+}

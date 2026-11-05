@@ -155,12 +155,12 @@ void Session::say(const std::string& line) const {
 
 // Structs whose layout in the patch differs from the running program's: objects
 // created before the patch keep the old layout, which the new code would misread.
-void Session::warn_layout_changes(const link::LinkResult& linked) {
+void Session::warn_layout_changes(ModuleState& module, const link::LinkResult& linked) {
     {
         std::unique_lock<std::mutex> lock(scan_mutex_);
         scan_cv_.wait(lock, [&] { return layouts_ready_ || stop_.load(); });
     }
-    if (!layouts_ok_) return;
+    if (!module.layouts_ok) return;
     std::set<std::string> reported;
     for (const auto& object : linked.patch.debug_objects) {
         std::unordered_map<std::string, image::TypeLayout> mine;
@@ -170,14 +170,14 @@ void Session::warn_layout_changes(const link::LinkResult& linked) {
             continue;
         }
         for (auto& [name, layout] : mine) {
-            auto old = layouts_.find(name);
-            if (old == layouts_.end() || old->second == layout || !reported.insert(name).second) continue;
+            auto old = module.layouts.find(name);
+            if (old == module.layouts.end() || old->second == layout || !reported.insert(name).second) continue;
             std::string what = old->second.size != layout.size
                                    ? std::to_string(old->second.size) + " -> " + std::to_string(layout.size) + " bytes"
                                    : "members moved";
             say("warning: layout of " + name + " changed (" + what +
                 "); objects created before this patch still have the old layout, restart if any are in use");
-            pending_layouts_[name] = layout;
+            module.pending_layouts[name] = layout;
         }
     }
 }
@@ -249,6 +249,13 @@ Session::Outcome Session::run() {
                     results_[res.id] = res;
                 }
                 reply_cv_.notify_all();
+            } else if (h.type == MsgType::ReserveReply) {
+                ReserveReply rep;
+                if (decode(mr, rep)) {
+                    std::lock_guard<std::mutex> lock(reply_mutex_);
+                    reserved_[rep.id] = rep;
+                }
+                reply_cv_.notify_all();
             } else if (h.type == MsgType::ResolveReply) {
                 ResolveReply rep;
                 if (decode(mr, rep)) {
@@ -278,45 +285,106 @@ void Session::start_hot_reload() {
     if (hello_.compile_commands.empty())
         throw std::runtime_error("the app reported no compile_commands.json (use hotpp_enable() or set HOTPP_COMPILE_COMMANDS)");
     if (hello_.modules.empty() || hello_.regions.empty()) throw std::runtime_error("the app reported no patch region");
-
     db_ = CompileDb::load(hello_.compile_commands);
-    const ModuleRecord& exe = hello_.modules[0];
-    image_ = image::ElfImage::load(exe.path);
-    if (!exe.build_id.empty() && !image_->build_id().empty() && exe.build_id != image_->build_id())
-        throw std::runtime_error(exe.path + " was rebuilt since the program started; restart it to hot reload");
-    index_.add_image(*image_, exe.base);
-    region_cursor_ = hello_.regions[0].base;
-    region_end_ = hello_.regions[0].base + hello_.regions[0].size;
+    patch_dir_ = fs::path(hello_.compile_commands).parent_path() / ".hotpp" / std::to_string(hello_.pid);
+    // Module setup asks the agent for patch regions, whose replies the connection
+    // thread reads, so it runs on the watcher thread.
+    watch_thread_ = std::thread([this] {
+        try {
+            setup_modules();
+        } catch (const std::exception& e) {
+            say("hot reload unavailable for pid " + std::to_string(hello_.pid) + ": " + e.what());
+            return;
+        }
+        watch_loop();
+    });
+}
 
-    for (const fs::path& cu : image_->compile_units()) units_.insert(normalize_path(cu));
-    if (units_.empty())
-        say("warning: " + exe_name_ + " has no usable DWARF info" +
-            (image_->dwarf_warning().empty() ? "" : " (" + image_->dwarf_warning() + ")") +
-            "; every file in compile_commands.json is treated as part of it");
+namespace {
+// System libraries are never built from the project's sources; skip reading them.
+bool system_library(const std::string& path) {
+    for (const char* prefix : {"/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/", "/usr/libexec/"})
+        if (path.rfind(prefix, 0) == 0) return true;
+    return path.empty() || path.find("linux-vdso") != std::string::npos;
+}
+} // namespace
+
+void Session::setup_modules() {
+    for (size_t i = 0; i < hello_.modules.size() && !stop_; ++i) {
+        const ModuleRecord& rec = hello_.modules[i];
+        const bool exe = i == 0;
+        if (!exe && system_library(rec.path)) continue;
+        auto m = std::make_unique<ModuleState>();
+        m->index = i;
+        m->name = fs::path(rec.path).filename().string();
+        try {
+            m->image = image::ElfImage::load(rec.path);
+        } catch (const std::exception&) {
+            if (exe) throw;
+            continue; // stripped or unreadable: not ours
+        }
+        for (const fs::path& cu : m->image->compile_units()) m->units.insert(normalize_path(cu));
+        bool ours = false;
+        for (const fs::path& u : m->units) ours |= db_->find(u) != nullptr;
+        if (exe && m->units.empty()) {
+            say("warning: " + m->name + " has no usable DWARF info" +
+                (m->image->dwarf_warning().empty() ? "" : " (" + m->image->dwarf_warning() + ")") +
+                "; every file in compile_commands.json is treated as part of it");
+            for (const CompileCommand& c : db_->entries()) m->units.insert(c.file);
+            ours = true;
+        }
+        if (!ours) {
+            if (exe) throw std::runtime_error("none of the sources " + m->name + " was built from are in " + hello_.compile_commands);
+            continue;
+        }
+        if (!rec.build_id.empty() && !m->image->build_id().empty() && rec.build_id != m->image->build_id()) {
+            if (exe) throw std::runtime_error(rec.path + " was rebuilt since the program started; restart it to hot reload");
+            say("warning: " + rec.path + " was rebuilt since it was loaded; not patching it");
+            continue;
+        }
+        RegionRecord region;
+        if (exe) {
+            region = hello_.regions[0];
+        } else if (auto r = reserve_region(uint32_t(i), hello_.regions[0].size)) {
+            region = *r;
+        } else {
+            say("warning: no room for a patch region next to " + m->name + "; not patching it");
+            continue;
+        }
+        m->cursor = region.base;
+        m->end = region.base + region.size;
+        m->symbols.add_image(*m->image, rec.base);
+        if (!exe) bind_interposed_variables(*m);
+        for (const fs::path& u : m->units) units_.insert(u);
+        modules_.push_back(std::move(m));
+    }
 
     std::vector<const CompileCommand*> program;
     for (const CompileCommand& c : db_->entries()) {
-        if (!units_.empty() && !units_.count(c.file)) continue;
+        if (!units_.count(c.file)) continue;
         std::error_code ec;
         if (!fs::exists(c.file, ec)) continue;
         watched_dirs_.insert(c.file.parent_path());
         content_hash_[c.file.string()] = std::hash<std::string>()(read_file(c.file));
         program.push_back(&c);
     }
-    if (program.empty())
-        throw std::runtime_error("none of the sources " + exe_name_ + " was built from are in " + hello_.compile_commands);
-
     std::string error;
     watcher_ = watch_directories({watched_dirs_.begin(), watched_dirs_.end()}, error);
     if (!watcher_) throw std::runtime_error(error);
 
-    const fs::path build_dir = fs::path(hello_.compile_commands).parent_path();
-    patch_dir_ = build_dir / ".hotpp" / std::to_string(hello_.pid);
-    say("watching " + plural(program.size(), "source file") + " of " + exe_name_ + " (" +
-        plural(index_.size(), "symbol") + " indexed)");
+    std::string names;
+    size_t symbols = 0;
+    for (const auto& m : modules_) {
+        names += (names.empty() ? "" : " + ") + m->name;
+        symbols += m->symbols.size();
+    }
+    say("watching " + plural(program.size(), "source file") + " of " + names + " (" + plural(symbols, "symbol") +
+        " indexed)");
 
-    // Which headers each source includes; header edits wait for this.
-    scan_thread_ = std::thread([this, program, cache = build_dir / ".hotpp" / "deps"] {
+    // Which headers each source includes (header edits wait for this), then the
+    // struct layouts for layout-change warnings.
+    const fs::path cache = fs::path(hello_.compile_commands).parent_path() / ".hotpp" / "deps";
+    scan_thread_ = std::thread([this, program, cache] {
         const auto started = Clock::now();
         const size_t failed = scan_dependencies(program, cache, std::max(1u, std::thread::hardware_concurrency()),
                                                 graph_, &stop_);
@@ -325,23 +393,67 @@ void Session::start_hot_reload() {
             scan_done_ = true;
         }
         scan_cv_.notify_all();
-        // Struct layouts of the running program, for layout-change warnings.
-        try {
-            layouts_ = image::dwarf_type_layouts(image_->file());
-            layouts_ok_ = true;
-        } catch (const std::exception& e) {
-            if (!stop_) say("warning: can't read struct layouts (" + std::string(e.what()) + "); no layout warnings");
+        if (!stop_)
+            say("tracking " + plural(graph_.headers().size(), "header") + " (dependency scan took " + ms_since(started) +
+                (failed ? ", " + plural(failed, "source") + " failed to scan" : std::string()) + ")");
+        for (const auto& m : modules_) {
+            if (stop_) break;
+            try {
+                m->layouts = image::dwarf_type_layouts(m->image->file());
+                m->layouts_ok = true;
+            } catch (const std::exception& e) {
+                say("warning: can't read struct layouts of " + m->name + " (" + e.what() + "); no layout warnings");
+            }
         }
         {
             std::lock_guard<std::mutex> lock(scan_mutex_);
             layouts_ready_ = true;
         }
         scan_cv_.notify_all();
-        if (!stop_)
-            say("tracking " + plural(graph_.headers().size(), "header") + " (dependency scan took " + ms_since(started) +
-                (failed ? ", " + plural(failed, "source") + " failed to scan" : std::string()) + ")");
     });
-    watch_thread_ = std::thread([this] { watch_loop(); });
+}
+
+// A shared library's exported variables may live elsewhere: a PIE executable that
+// uses one gets its own copy (a copy relocation), and the dynamic linker binds the
+// library's references to that copy. The agent's dlsym says where each one is.
+void Session::bind_interposed_variables(ModuleState& m) {
+    std::vector<std::string> names;
+    for (const image::ImageSymbol& sym : m.image->symbols())
+        if (sym.bind != elf::STB_LOCAL && sym.visibility == elf::STV_DEFAULT && sym.type == elf::STT_OBJECT)
+            names.push_back(sym.name);
+    if (names.empty()) return;
+    std::vector<uint64_t> addrs;
+    try {
+        addrs = resolve_external(names);
+    } catch (const std::exception& e) {
+        say("warning: can't look up where " + m.name + "'s variables live (" + e.what() + ")");
+        return;
+    }
+    size_t moved = 0;
+    for (size_t i = 0; i < names.size(); ++i) {
+        const link::SymbolKey key{false, "", names[i]};
+        const link::IndexEntry* e = m.symbols.find(key);
+        if (addrs[i] && e && e->address != addrs[i] && m.symbols.rebind(key, addrs[i])) ++moved;
+    }
+    if (moved && options_.verbose)
+        say(plural(moved, "variable") + " of " + m.name + " live in another module (copy relocations)");
+}
+
+std::optional<RegionRecord> Session::reserve_region(uint32_t module_index, uint64_t size) {
+    ReserveRequest req;
+    req.id = next_request_++;
+    req.module_index = module_index;
+    req.size = size;
+    Writer w;
+    encode(w, req);
+    if (!send(MsgType::ReserveRequest, w)) return std::nullopt;
+    std::unique_lock<std::mutex> lock(reply_mutex_);
+    reply_cv_.wait_for(lock, std::chrono::seconds(10), [&] { return disconnected_ || reserved_.count(req.id); });
+    auto it = reserved_.find(req.id);
+    if (it == reserved_.end() || !it->second.ok) return std::nullopt;
+    RegionRecord r = it->second.region;
+    reserved_.erase(it);
+    return r;
 }
 
 void Session::watch_headers() {
@@ -382,7 +494,7 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
     std::set<fs::path> picked;
     auto add_tu = [&](const fs::path& file) {
         const CompileCommand* cmd = db_->find(file);
-        if (!cmd || (!units_.empty() && !units_.count(cmd->file))) return; // another program's source
+        if (!cmd || !units_.count(cmd->file)) return; // another program's source
         if (picked.insert(cmd->file).second) tus.push_back(cmd);
     };
 
@@ -471,16 +583,34 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
     if (failed) return;
     if (scan_done_) watch_headers(); // newly included headers
 
-    link::LinkResult linked;
+    // Link each object against the module it belongs to (a source can be part of
+    // several), then send everything as one patch.
+    struct ModuleLink {
+        ModuleState* module;
+        std::vector<const object::ElfObject*> objects;
+        link::LinkResult result;
+    };
+    std::vector<ModuleLink> links;
+    for (size_t i = 0; i < jobs.size(); ++i)
+        for (const auto& m : modules_) {
+            if (!m->units.count(jobs[i].cmd->file)) continue;
+            auto it = std::find_if(links.begin(), links.end(), [&](const ModuleLink& l) { return l.module == m.get(); });
+            if (it == links.end()) it = links.insert(links.end(), ModuleLink{m.get(), {}, {}});
+            it->objects.push_back(objects[i].get());
+        }
     try {
-        std::vector<const object::ElfObject*> ptrs;
-        for (const auto& o : objects) ptrs.push_back(o.get());
-        link::LinkOptions opt;
-        opt.region_cursor = region_cursor_;
-        opt.region_end = region_end_;
-        opt.tls_block_size = image_->tls_block_size();
-        linked = link::link_patch(
-            ptrs, index_, [this](const std::vector<std::string>& n) { return resolve_external(n); }, opt);
+        for (ModuleLink& l : links) {
+            const ModuleRecord& rec = hello_.modules[l.module->index];
+            link::LinkOptions opt;
+            opt.region_cursor = l.module->cursor;
+            opt.region_end = l.module->end;
+            opt.tls_static = rec.tls_static;
+            opt.tls_offset = rec.tls_offset;
+            opt.tls_module_id = rec.tls_module_id;
+            l.result = link::link_patch(
+                l.objects, l.module->symbols, [this](const std::vector<std::string>& n) { return resolve_external(n); },
+                opt);
+        }
     } catch (const link::RestartRequired& e) {
         say("patch " + std::to_string(id) + " not applied, restart required: " + e.what());
         return;
@@ -488,17 +618,35 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
         say("patch " + std::to_string(id) + " not applied: " + e.what());
         return;
     }
-    if (options_.verbose)
-        for (const std::string& line : linked.log) say("  " + line);
-    for (const std::string& note : linked.notes) say("note: " + note);
-    pending_layouts_.clear();
-    warn_layout_changes(linked);
 
-    linked.patch.id = id;
+    Patch patch;
+    patch.id = id;
+    size_t replaced = 0, fresh = 0, kept = 0, inits = 0;
+    uint64_t bytes = 0;
+    for (ModuleLink& l : links) {
+        const std::string where = links.size() > 1 ? " [" + l.module->name + "]" : "";
+        if (options_.verbose)
+            for (const std::string& line : l.result.log) say("  " + line + where);
+        for (const std::string& note : l.result.notes) say("note: " + note);
+        l.module->pending_layouts.clear();
+        warn_layout_changes(*l.module, l.result);
+        proto::Patch& p = l.result.patch;
+        patch.segments.insert(patch.segments.end(), p.segments.begin(), p.segments.end());
+        patch.sites.insert(patch.sites.end(), p.sites.begin(), p.sites.end());
+        patch.eh_frames.insert(patch.eh_frames.end(), p.eh_frames.begin(), p.eh_frames.end());
+        patch.initializers.insert(patch.initializers.end(), p.initializers.begin(), p.initializers.end());
+        for (auto& d : p.debug_objects) patch.debug_objects.push_back(std::move(d));
+        replaced += l.result.functions_redirected;
+        fresh += l.result.functions_new;
+        kept += l.result.data_kept;
+        inits += l.result.initializers_run;
+        bytes += l.result.bytes_used;
+    }
+
     Writer w;
-    encode(w, linked.patch);
+    encode(w, patch);
     if (!send(MsgType::Patch, w)) return;
-    region_cursor_ += linked.bytes_used; // reserved even if applying fails half way
+    for (ModuleLink& l : links) l.module->cursor += l.result.bytes_used; // reserved even if applying fails
 
     const std::optional<PatchResult> result = wait_for_result(id);
     if (!result) return; // disconnected
@@ -506,14 +654,16 @@ void Session::handle_changes(const std::vector<fs::path>& files) {
         say("patch " + std::to_string(id) + " failed in the app: " + result->error);
         return;
     }
-    index_.apply(linked.delta);
-    for (auto& [name, layout] : pending_layouts_) layouts_[name] = layout; // warn once per change
-    std::string summary = plural(linked.functions_redirected, "function") + " replaced, " +
-                          std::to_string(linked.functions_new) + " new, " + plural(linked.data_kept, "variable") +
-                          " kept";
-    if (linked.initializers_run) summary += ", " + plural(linked.initializers_run, "initializer") + " run";
+    for (ModuleLink& l : links) {
+        l.module->symbols.apply(l.result.delta);
+        for (auto& [name, layout] : l.module->pending_layouts) l.module->layouts[name] = layout; // warn once
+    }
+    std::string summary = plural(replaced, "function") + " replaced, " + std::to_string(fresh) + " new, " +
+                          plural(kept, "variable") + " kept";
+    if (inits) summary += ", " + plural(inits, "initializer") + " run";
+    if (links.size() > 1) summary += ", " + std::to_string(links.size()) + " modules";
     say("patch " + std::to_string(id) + " applied in " + ms_since(started) + ": " + names + " (" + summary + ", " +
-        format_size(linked.bytes_used) + ")");
+        format_size(bytes) + ")");
 }
 
 std::vector<uint64_t> Session::resolve_external(const std::vector<std::string>& names) {
