@@ -48,7 +48,12 @@ if(HOTPP_BUILD_HOST)
     # Everything but main(), so unit tests can link the host code.
     add_library(hotpp_host_lib STATIC
         src/host/compile_db.cpp
+        src/host/control.cpp
+        src/host/control_protocol.cpp
         src/host/deps.cpp
+        src/host/events.cpp
+        src/host/registry.cpp
+        src/host/report.cpp
         src/host/session.cpp
         src/host/session_state.cpp
         src/host/elf/elf_file.cpp
@@ -79,10 +84,19 @@ if(HOTPP_BUILD_HOST)
         target_link_options(hotpp_host_lib PUBLIC -fsanitize=address,undefined)
     endif()
 
+    # hotpp mcp: the MCP server for AI agents (in the same executable).
+    add_library(hotpp_mcp_lib STATIC
+        src/mcp/hosts.cpp
+        src/mcp/main.cpp
+        src/mcp/server.cpp
+        src/mcp/tools.cpp)
+    target_compile_options(hotpp_mcp_lib PRIVATE ${HOTPP_WARNINGS})
+    target_link_libraries(hotpp_mcp_lib PUBLIC hotpp_host_lib)
+
     add_executable(hotpp src/host/main.cpp)
     add_executable(hotpp::hotpp ALIAS hotpp)
     target_compile_options(hotpp PRIVATE ${HOTPP_WARNINGS})
-    target_link_libraries(hotpp PRIVATE hotpp_host_lib)
+    target_link_libraries(hotpp PRIVATE hotpp_mcp_lib hotpp_host_lib)
 endif()
 
 # Regenerates single_include/hotpp/hotpp.h from the agent sources.

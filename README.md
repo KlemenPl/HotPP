@@ -7,6 +7,8 @@ Hot reload for C++ on Linux. Save a source file while your program runs, and the
 
 HotPP works like Live++: it recompiles the changed files with your build's own commands, links them against the running process and redirects the old functions to the new ones.
 
+AI coding agents can drive it too: `hotpp mcp` is an [MCP](https://modelcontextprotocol.io) server that lets an agent launch your program, patch its edits in and read compile errors and output (see [AI agents](#ai-agents-mcp)).
+
 Version 1.0.0 ([changelog](CHANGELOG.md)). Requires Linux on x86-64 and GCC ≥ 11 or Clang ≥ 14. Building HotPP also needs CMake ≥ 3.25, and the tests need Python 3. How it works: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Build HotPP
@@ -103,6 +105,8 @@ hotpp [options] -- <program> [args...]   start a program under the host
 |---|---|
 | `--build "<command>"` | Rebuild command for hot restarts, e.g. `"cmake --build build"`. |
 | `--auto-restart` | When a change can't be patched, rebuild and restart the program (same pid, same arguments). |
+| `--no-auto-reload` | Don't patch saved files until a controller (`hotpp mcp`) asks. |
+| `--capture-output` | Run the program on a pseudo-terminal and keep its output for `hotpp mcp` (it's still printed). |
 | `-v` | Print every module at connect and every symbol decision per patch. |
 | `--endpoint <path>` | Socket to listen on. |
 
@@ -115,6 +119,43 @@ hotpp [options] -- <program> [args...]   start a program under the host
 | `HOTPP_HOST`, `HOTPP_LAUNCH_HOST=0` | Host to launch / don't launch one. |
 | `HOTPP_ENDPOINT`, `HOTPP_COMPILE_COMMANDS` | Override the socket / `compile_commands.json` path. |
 | `NO_COLOR` | Plain host output. |
+
+## AI agents (MCP)
+
+`hotpp mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio. With it, an agent such as Claude Code, Cursor or Codex can start your program under HotPP, edit sources and patch them into the running program, and see what happened. Add it to Claude Code:
+
+```bash
+claude mcp add hotpp -- hotpp mcp --build "cmake --build build"
+```
+
+Or for everyone working on the project, in `.mcp.json` (Cursor reads the same format from `.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "hotpp": { "command": "hotpp", "args": ["mcp", "--build", "cmake --build build"] }
+  }
+}
+```
+
+Use the full path to `hotpp` if it isn't on the agent's `PATH`. Then ask the agent to run the program and change it.
+
+| Tool | |
+|---|---|
+| `hotpp_launch` | Start a program under HotPP, e.g. `["./build/game"]`, and wait until it can be patched. |
+| `hotpp_reload` | Apply every changed source and header as one patch; returns success, the compiler's errors, or that a restart is needed. |
+| `hotpp_restart` | Rebuild (with the build command) and restart the program in place. |
+| `hotpp_status` | Programs under HotPP: what they watch, whether they run the sources on disk, the last patch. |
+| `hotpp_output` | What a launched program printed. |
+| `hotpp_logs` | The host's messages and patch history; can wait for new ones. |
+| `hotpp_set_auto_reload` | Patch on every save, or only on `hotpp_reload`. |
+| `hotpp_stop` | Stop a launched program. |
+
+How it behaves:
+- **Programs the agent launches** don't change until it calls `hotpp_reload`, so a change spread over several files is applied in one patch. They stop when the MCP server exits, for example when you quit the agent.
+- **Programs you start** with `hotpp -- ./game`, a `hotpp` in a terminal, or a host the agent library launched are found too. The agent can patch and restart them, but not stop them or read their output. If it turns auto-reload off on your host, the setting reverts when the MCP server exits.
+- `--no-launch` limits the agent to programs you start yourself.
+- `--endpoint <path>` adds a host on a socket outside the usual place.
 
 ## What needs a restart
 
@@ -141,7 +182,7 @@ ctest --test-dir build --output-on-failure   # unit + end-to-end tests (gdb opti
 cmake -B build-asan -DHOTPP_SANITIZE=ON      # host and tests under ASan + UBSan (=thread: TSan)
 ```
 
-CI (`.gitea/workflows/ci.yml`) runs the suite with GCC and Clang, Debug and Release, and under ASan/UBSan.
+CI (`.gitea/workflows/ci.yml`) runs the suite with GCC and Clang, Debug and Release, and under ASan/UBSan and TSan.
 
 ```bash
 cmake --build build --target hotpp_single_header   # after changing the agent

@@ -9,6 +9,8 @@
 #include "host/image/elf_image.h"
 #include "host/link/symbol_index.h"
 #include "host/platform.h"
+#include "host/registry.h"
+#include "host/report.h"
 #include "host/watcher.h"
 
 #include <atomic>
@@ -31,6 +33,7 @@ struct HostOptions {
     bool verbose = false;      // print every binding decision of every patch
     std::string build_command; // rebuilds the program for a hot restart (run with /bin/sh -c)
     bool auto_restart = false; // hot-restart when a change can't be patched
+    bool auto_reload = true;   // patch saved files right away (else only when a controller asks)
 };
 
 // Bumped (e.g. by SIGUSR1) to ask every connected program to hot-restart.
@@ -38,7 +41,8 @@ extern std::atomic<int> g_restart_requests;
 
 class Session {
 public:
-    Session(std::unique_ptr<Stream> stream, HostOptions options);
+    // Events go to `events`; the session registers itself in `registry` for controllers.
+    Session(std::unique_ptr<Stream> stream, HostOptions options, EventLog& events, Registry& registry);
     ~Session();
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
@@ -47,8 +51,9 @@ public:
         bool hello = false;     // the agent completed the handshake
         bool layout_ok = false; // its patch region is usable
     };
-    // Serves the connection until the agent disconnects.
-    Outcome run();
+    // Serves the connection until the agent disconnects. `hello` is the payload of
+    // the first message, which was a Hello.
+    Outcome run(const std::vector<uint8_t>& hello);
 
 private:
     bool send(proto::MsgType type, const proto::Writer& w);
@@ -77,16 +82,38 @@ private:
     void bind_interposed_variables(ModuleState& module);
     void watch_loop();
     void watch_headers();
-    bool changed(const std::filesystem::path& file); // content differs from the last time we looked
-    void handle_changes(const std::vector<std::filesystem::path>& files);
-    void warn_layout_changes(ModuleState& module, const link::LinkResult& linked);
-    void hot_restart(const std::string& reason);
+    // Content differs from the last time we looked (and remembers the new content).
+    bool changed(const std::filesystem::path& file);
+    bool differs(const std::filesystem::path& file) const; // same, without remembering
+    void remember(const std::filesystem::path& file);
+    // Patches the changed ones among `files`. nullptr if there was nothing to patch.
+    std::shared_ptr<PatchReport> handle_changes(const std::vector<std::filesystem::path>& files, const char* trigger);
+    void warn_layout_changes(ModuleState& module, const link::LinkResult& linked, PatchReport& report);
+    struct RestartResult {
+        bool restarting = false; // the Restart message went out
+        std::string outcome;     // restarting | build_failed | disconnected
+        std::string error, output;
+    };
+    // Rebuilds (if `rebuild` and there is a build command), then restarts.
+    RestartResult hot_restart(const std::string& reason, bool rebuild = true);
+    // Controllers' requests and auto-reload being switched.
+    void serve_requests();
+    void defer(const std::vector<std::filesystem::path>& files); // auto-reload off: remember for later
+    std::vector<std::filesystem::path> rescan();                // tracked files whose mtime or size changed
+    bool relevant(const std::filesystem::path& file) const;     // part of this program's build
+    void publish(const std::shared_ptr<PatchReport>& report);
+    void sync_info();                                           // pending/failed files into the snapshot
     std::vector<uint64_t> resolve_external(const std::vector<std::string>& names);
-    std::optional<proto::PatchResult> wait_for_result(uint32_t id);
-    void say(const std::string& line) const;
+    std::optional<proto::PatchResult> wait_for_result(uint32_t id, const std::shared_ptr<PatchReport>& report);
+    // Prints a line and logs it as an event of `kind` (no event if nullptr).
+    void say(const std::string& line, const char* kind = "log") const;
+    void unavailable(const std::string& why);
 
     std::unique_ptr<Stream> stream_;
     HostOptions options_;
+    EventLog& events_;
+    Registry& registry_;
+    std::shared_ptr<SessionHandle> handle_;
     std::mutex send_mutex_;
     proto::Hello hello_;
     std::string exe_name_;
@@ -99,7 +126,17 @@ private:
     // the watcher thread adds and drops modules (dlopen/dlclose).
     std::vector<std::shared_ptr<ModuleState>> modules_;
     std::set<std::filesystem::path> units_;              // sources of all of them
-    std::unordered_map<std::string, size_t> content_hash_;
+    struct FileState {
+        size_t hash = 0;
+        std::filesystem::file_time_type mtime{};
+        uintmax_t size = 0;
+    };
+    std::unordered_map<std::string, FileState> files_; // every source and header looked at
+    std::set<std::filesystem::path> pending_;          // changed, not patched yet (auto-reload off)
+    std::set<std::filesystem::path> failed_files_;     // their newest version failed to patch
+    std::vector<std::shared_ptr<SessionRequest>> current_; // reload requests being served
+    std::shared_ptr<const PatchReport> last_failure_;
+    bool auto_reload_seen_ = true;
     std::unique_ptr<FileWatcher> watcher_;
     std::set<std::filesystem::path> watched_dirs_;
     DependencyGraph graph_;

@@ -31,6 +31,11 @@ enum class MsgType : uint16_t {
     ReserveReply = 10,  // agent -> host
     Restart = 11,       // host -> agent: exec the (rebuilt) executable again
     ModulesChanged = 12, // agent -> host: libraries were loaded or unloaded (dlopen/dlclose)
+    // Controllers (hotpp mcp) use the host's socket too: their first message is a
+    // ControlHello, then both sides exchange JSON in Control messages. Agents never
+    // see these; the version field doesn't apply to them (see host/control_protocol.h).
+    ControlHello = 100, // controller -> host
+    Control = 101,      // either way
 };
 
 // Memory protection bits used in Patch segments.

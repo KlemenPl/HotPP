@@ -1,6 +1,6 @@
 # HotPP — Design
 
-Status: version 1.0.0 · M0, M1, M3, M4, M5.1 and M5.2 implemented; M2 (Windows) and M5.3 (attach) dropped · Last updated: 2026-11-05
+Status: version 1.0.0 · M0, M1, M3, M4, M5.1, M5.2 and M6 (MCP) implemented; M2 (Windows) and M5.3 (attach) dropped · Last updated: 2026-11-06
 
 HotPP is a hot-reload tool for C++ on Linux (x86-64, GCC and Clang). You edit a `.cpp` file or a header, save it, and the running program picks up the new code, typically within a fraction of a second. It doesn't restart and doesn't lose state.
 
@@ -123,6 +123,57 @@ When a session ends while the process is still alive, the state file stays (only
 If the state is missing (and something was patched) or doesn't match, the host refuses to patch, with a message to restart the program. New code could otherwise land on live code, and the old patches' new symbols would be unknown. A hello that isn't `resumed` (a new process, or a hot restart reusing the pid) deletes any stale state file.
 
 The host itself shuts down cleanly on `SIGINT`/`SIGTERM`: it stops accepting, removes the socket file, ends open connections and joins the session threads. In run mode, it passes `SIGTERM` (or a second Ctrl+C) on to the program.
+
+### 3.4 Controllers
+Besides agents, a host accepts **controllers** on the same socket: today that's `hotpp mcp` (§14). The first message decides which a connection is: `Hello` for an agent, `ControlHello` for a controller. Agents and their protocol version are untouched, so programs built with 1.0 work with a 1.1 host. A 1.0 host drops a `ControlHello`, and controllers report it as one they can't control.
+
+- **Framing:** the usual 12-byte header, then UTF-8 JSON (`src/host/control_protocol.h`). The controller sends `{"control_version": 1, "client": ...}`. The host answers with a description of itself: version, pid, endpoint, mode, build command, whether it captures output, and its child in run mode.
+- **Requests** are `{"id", "method", "params"}`. Answers are `{"id", "result"}` or `{"id", "error": {"message"}}`, with any number of `{"id", "progress": "<log line>"}` before them. Requests run concurrently, at most 8 per connection.
+
+| Method | Does |
+|---|---|
+| `status` | the host and every connected program's `SessionInfo` |
+| `reload` | apply all changes now (see below) and report |
+| `restart` | rebuild (if asked and configured), re-exec, wait until the same pid is back and set up |
+| `events` | the event log after a cursor, optionally waiting for more |
+| `output` | the captured program output after a cursor, or its last lines |
+| `set_auto_reload` | patch on save or only on request, for one program |
+| `wait_program` | wait until a program is set up, or the child exits (used right after launching) |
+| `stop` | stop the child and let the host exit; only on hosts started with `--lifeline` |
+
+**What other threads see of a session.** A `SessionHandle` per session (`src/host/registry.h`) is all other threads touch. It holds:
+- a snapshot of its state, updated by the session's own threads: state, modules, source and header counts, patch counters, the last 20 `PatchReport`s, pending and failed files, auto-reload
+- a queue of requests (`reload`, `restart`) that the watcher thread takes between file events. An eventfd wakes it.
+
+The host's `Registry` lists the newest session of each pid, so a hot restart's lingering old session is hidden.
+
+**Reports and events.**
+- Every patch attempt produces a `PatchReport`:
+  - id, trigger (`watch` or `request`), the files and the changed headers that pulled them in
+  - status: `applied`, `compile_failed`, `link_failed`, `restart_required`, `failed_in_app` or `not_applied`
+  - the console line, the error, warnings and notes, the counts
+  - the compiler's output, with ANSI color codes removed and capped at 48 KiB of the start plus 8 KiB of the end
+- Reports, log lines, connects, disconnects and the child's exit go into a bounded `EventLog` (5000 events). Its sequence numbers serve as cursors.
+
+**Reload.** A reload request takes, as one patch:
+- the files deferred while auto-reload was off
+- watcher events not read yet
+- every tracked source and header whose size or modification time changed (hashing only those). This catches what inotify missed.
+
+It returns the outcome:
+- `up_to_date` when nothing changed and nothing is failing
+- `out_of_sync` when nothing changed but an earlier patch of some file failed: that report comes back again
+- `waiting_for_sync_point` if the program hasn't applied the patch 2 s after receiving it. The patch stays queued.
+
+**Auto-reload** is per program. `--no-auto-reload` turns it off at the start. A controller's `set_auto_reload` lasts while its connection does: the registry keeps it per pid, across hot restarts, and reverts it when that controller disconnects. That way an agent can't leave a user's host paused.
+
+**Launched hosts.** `hotpp mcp` starts hosts in run mode with these flags:
+- `--capture-output`: the program's stdout and stderr go to a pseudo-terminal, so it keeps line buffering. The host keeps the last 1 MiB with byte offsets, and still prints it.
+- `--lifeline <fd>`: the read end of a pipe whose only write end the MCP server holds. End of file means the server is gone, however it died: the host sends the program `SIGTERM`, then `SIGKILL` after 5 s, and exits. A death signal (`PR_SET_PDEATHSIG`) would fire when the spawning *thread* exits, not the process.
+- After the program exits, such a host stays until a `stop` or the lifeline closes, so the agent can still read the output.
+- Child processes get `SIGPIPE` at its default and an empty signal mask, whatever the host has.
+
+**Security.** The socket is mode 0600 in the user's runtime directory. The host also checks the peer's uid (`SO_PEERCRED`) on control connections. A controller can't change the build command; only whoever starts the host sets it. At most 16 controllers per host, requests up to 1 MiB.
 
 ---
 
@@ -426,6 +477,8 @@ HotPP/
 │   └── region_select.cpp                 # where the region goes (pure, unit tested)
 ├── src/host/                             # the hotpp executable
 │   ├── main.cpp, session.cpp             # serve/run modes; per-agent pipeline
+│   ├── control.cpp, control_protocol.cpp # controllers (§3.4)
+│   ├── registry.cpp, events.cpp, report.cpp # session handles, event log, patch reports
 │   ├── compile_db.cpp, deps.cpp          # compile_commands.json, dependency graph
 │   ├── watcher_linux.cpp, platform_linux.cpp
 │   ├── elf/elf_file.cpp                  # bounds-checked ELF reading
@@ -434,7 +487,11 @@ HotPP/
 │   ├── object/elf_object.cpp             # relocatable objects
 │   ├── link/linker.cpp, symbol_index.cpp, patch_site.cpp
 │   └── util/json.cpp
-├── tests/unit/, tests/e2e/               # §12
+├── src/mcp/                              # hotpp mcp (§14)
+│   ├── server.cpp                        # JSON-RPC, MCP lifecycle, tool calls
+│   ├── hosts.cpp                         # discovery, control client, launching
+│   └── tools.cpp                         # the tools and their text
+├── tests/unit/, tests/e2e/, tests/mcp/   # §12
 └── examples/basic/
 ```
 
@@ -473,6 +530,7 @@ Defining `HOTPP_DISABLE` turns the whole API into inline no-ops.
 | **M5.1** | Shared libraries: every module built from the project's sources is patched, with its own index and region | A `.so`'s globals (including copy-relocated ones), statics and `thread_local`s survive a patch; it can call back into the program (`shared_lib` case). | done |
 | **M5.2** | Hot restart: for changes that need a restart, rebuild with the user's build command and re-exec with the same command line | The program restarts on the new build from the host, without the user restarting it (`restart` case). | done |
 | **M5.3** | Attach to a running program that wasn't linked with the agent | — | dropped: programs link the agent or the single header, as with Live++ |
+| **M6** | AI agents: a control channel in every host (§3.4) and `hotpp mcp`, an MCP server (§14) | An MCP client launches a program, applies a two-file edit as one patch, gets a compile error with the compiler's output, restarts after a resize, attaches to a user's host, and its launched program dies with it (`mcp` case). | done (1.1) |
 
 Each milestone ends with a git commit, pushed to the Gitea remote, once its "done when" condition is met.
 
@@ -500,6 +558,9 @@ Each milestone ends with a git commit, pushed to the Gitea remote, once its "don
 - ELF image and object parsing against the test binary itself
 - the linker, run against a real object file compiled like a patch, with a hand-made index: bindings, stubs, canonical addresses (including `static` functions referenced through their section symbol), resize rejection
 - struct layouts read from the test binary's own DWARF
+- the JSON writer (exact integers, invalid UTF-8 replaced), the event log and output buffer (cursors, trimming, UTF-8 boundaries), ANSI stripping and output capping, the registry (newest session per pid, auto-reload owners, requests)
+- the MCP layer with a fake tool provider: version negotiation, errors for every kind of bad message, batches, progress, cancellation, the call limit, and thousands of mutated messages
+- the control channel against a real controller on a socket: requests, errors, a long poll ended by the controller leaving, discovery skipping stale sockets, a 1.0-style host recognized as incompatible, tool argument checking
 
 ### End-to-end cases (`tests/e2e`)
 Each case is a directory `tests/e2e/cases/<case>/` with:
@@ -538,6 +599,7 @@ The program checks its invariants every frame (state never resets, old and new r
 | `host_restart` | The host is killed (`SIGKILL`) and restarted, later stopped (`SIGTERM`) and restarted; each time the agent reconnects, the new host resumes the patch history (numbering, function versions, a variable a patch added), and further patches apply with all state intact. |
 | `install_and_consume` (not an e2e case) | Installs HotPP into a temporary prefix, builds a separate `find_package(HotPP)` project against it and runs it under the installed host. |
 | `gdb_step` | Under gdb: a breakpoint in new code, locals and kept globals, a backtrace into old code, `finish` (§9). Runs only if gdb is installed. |
+| `mcp` | Driven by `tests/mcp/run_mcp_test.py`, a minimal MCP client, with a private `$XDG_RUNTIME_DIR`. It launches the program and edits two files; with auto-reload off, status lists them pending and nothing changes until `hotpp_reload` applies both as one patch, with the counter kept. Then a compile error (output included, no color codes, `out_of_sync` on repeat) and its fix, malformed messages, an automatic patch seen through a long-polled `hotpp_logs`, a resize, `restart_required` and `hotpp_restart` (same pid). It stops the program, attaches to a host started with `hotpp --` (patch, temporary auto-reload setting reverted on exit, no stop, no output), and checks that a program launched by an MCP server killed with `SIGKILL` dies too. |
 
 **Matrix:** {GCC, Clang} × {Debug (`-O0`), Release (`-O2`)}, in four build directories. With gdb mode, `case.json` can also run the program under gdb (`"gdb": "<script>"`, `"expect_output": [...]`). `"env"` sets environment variables, and a step's `"expect"` may list several lines in order.
 
@@ -552,3 +614,52 @@ The program checks its invariants every frame (state never resets, old and new r
 | 3 | Signals used to pause threads interrupt some syscalls (`EINTR`) in user code. | `SA_RESTART`; the pause is short and only happens while sites are written. A ptrace-based helper is the fallback if it causes problems. |
 | 4 | Compiler arguments with response files (`@file`). | Pass through unchanged today; expand them in the compiler driver if the output or depfile flags hide inside one. |
 | 5 | Programs using LLVM's libunwind instead of libgcc. | Per-FDE registration via `__unw_add_dynamic_fde` if needed. |
+
+---
+
+## 14. MCP server (`hotpp mcp`)
+
+`hotpp mcp` lets AI coding agents use HotPP through the [Model Context Protocol](https://modelcontextprotocol.io). It is a mode of the `hotpp` executable that speaks JSON-RPC 2.0 over stdio, one message per line. It holds no hot-reload state of its own: it translates tool calls into control requests (§3.4) to hosts, so it can be restarted at any time.
+
+**Protocol** (`src/mcp/server.cpp`):
+- Versions 2025-11-25, 2025-06-18, 2025-03-26 and 2024-11-05. The client's version is echoed if supported, otherwise the newest is offered.
+- `initialize` returns the `tools` capability and `instructions` on how to use HotPP. The server also answers `ping`, `tools/list` and `tools/call`, and accepts `notifications/initialized` and `notifications/cancelled`; a cancelled call gets no reply.
+- `notifications/progress` messages carry the host's log lines when the call has a `progressToken`. Batches (2025-03-26) are answered as one array.
+- Standard error codes for bad messages: -32700, -32600, -32601, -32602. Tool failures are results with `isError: true` and a message the model can act on, including bad arguments (each tool's `inputSchema` is strict).
+- Tool calls run on worker threads, at most 16 at once (more are turned away with an error result). Results carry readable `text`, with compiler output verbatim, and the raw host data as `structuredContent`.
+- **stdout carries only protocol.** At startup it is duplicated to a private descriptor and fd 1 is pointed at stderr, so nothing else can corrupt the stream. Children never inherit it.
+- Lines over 16 MiB are refused and skipped to the next newline. `SIGPIPE` is ignored.
+- End of input lets calls in progress finish; `SIGTERM`, `SIGINT` or `SIGHUP` cancel them. Either way, launched programs are stopped before it exits.
+
+**Finding programs** (`src/mcp/hosts.cpp`):
+- Every socket named `hotpp.sock` or `hotpp-*.sock` in the runtime directory is a candidate, plus `--endpoint` paths and `$HOTPP_ENDPOINT`.
+- Connections are kept per host and reopened when lost. Stale sockets are skipped, and incompatible hosts are remembered until their socket file changes.
+- A tool's `pid` picks the program. Without one: the only program there is; else the only one this server launched; else an error that lists them.
+
+**Launching.** `hotpp_launch` starts `/proc/self/exe --endpoint <runtime>/hotpp-mcp-<pid>-<n>.sock --capture-output --lifeline 3 [--no-auto-reload] [--build …] -- <command>`:
+- in its own process group, so Ctrl+C in the agent's terminal doesn't reach it
+- with stdin from `/dev/null`
+- with its stdout piped to the server, which keeps the last 64 KiB for error messages
+
+It then waits for `wait_program` and reports the result:
+- ready: what the program watches, and its output so far
+- the program exited: the output, and the host is dismissed
+- no agent connected: probably not built with HotPP
+- hot reload unavailable, with the reason
+
+**Tools.**
+
+| Tool | Notes |
+|---|---|
+| `hotpp_status` | all programs and hosts; read-only |
+| `hotpp_reload` | as §3.4; reports earlier patches the agent hasn't seen (cursor per host and pid) |
+| `hotpp_launch` | `command`, `cwd`, `env`, `build_command` (default `--build`), `auto_restart`, `auto_reload` (default off) |
+| `hotpp_restart` | `rebuild` (default true); waits until the program is back |
+| `hotpp_stop` | only programs this server launched |
+| `hotpp_output` | only captured (launched) programs; cursor or last lines |
+| `hotpp_logs` | cursor and long poll |
+| `hotpp_set_auto_reload` | temporary on hosts the user started (§3.4) |
+
+`--no-launch` turns off launching, which leaves observing and patching programs the user started.
+
+**Not done:** the Streamable HTTP transport (local stdio covers coding agents), resources and prompts, sending input to a program.

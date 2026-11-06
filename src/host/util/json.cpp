@@ -1,5 +1,8 @@
 #include "host/util/json.h"
 
+#include <cerrno>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 
 namespace hotpp::json {
@@ -19,9 +22,169 @@ bool Value::as_bool() const {
     return bool_;
 }
 
+int64_t Value::as_integer() const {
+    if (!is_integer()) throw JsonError("expected an integer");
+    return int_;
+}
+
 const std::vector<Value>& Value::as_array() const {
     if (type_ != Type::Array) throw JsonError("expected a JSON array");
     return array_;
+}
+
+const std::vector<std::pair<std::string, Value>>& Value::as_object() const {
+    if (type_ != Type::Object) throw JsonError("expected a JSON object");
+    return object_;
+}
+
+Value& Value::set(std::string key, Value v) {
+    if (type_ == Type::Null) type_ = Type::Object;
+    if (type_ != Type::Object) throw JsonError("set() on a JSON value that is not an object");
+    for (auto& [k, old] : object_)
+        if (k == key) {
+            old = std::move(v);
+            return *this;
+        }
+    object_.emplace_back(std::move(key), std::move(v));
+    return *this;
+}
+
+Value& Value::push(Value v) {
+    if (type_ == Type::Null) type_ = Type::Array;
+    if (type_ != Type::Array) throw JsonError("push() on a JSON value that is not an array");
+    array_.push_back(std::move(v));
+    return *this;
+}
+
+size_t Value::size() const {
+    return type_ == Type::Array ? array_.size() : type_ == Type::Object ? object_.size() : 0;
+}
+
+namespace {
+
+// Length of the valid UTF-8 sequence at s[i], or 0 if it isn't one (overlong
+// forms, surrogates and code points above U+10FFFF are invalid).
+size_t utf8_sequence(std::string_view s, size_t i) {
+    const auto b = [&](size_t k) { return uint8_t(s[i + k]); };
+    const uint8_t c = b(0);
+    if (c < 0x80) return 1;
+    size_t n;
+    uint32_t cp;
+    if (c >= 0xC2 && c <= 0xDF) n = 2, cp = c & 0x1F;
+    else if (c >= 0xE0 && c <= 0xEF) n = 3, cp = c & 0x0F;
+    else if (c >= 0xF0 && c <= 0xF4) n = 4, cp = c & 0x07;
+    else return 0;
+    if (i + n > s.size()) return 0;
+    for (size_t k = 1; k < n; ++k) {
+        if ((b(k) & 0xC0) != 0x80) return 0;
+        cp = (cp << 6) | (b(k) & 0x3F);
+    }
+    if ((n == 3 && cp < 0x800) || (n == 4 && (cp < 0x10000 || cp > 0x10FFFF))) return 0;
+    if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
+    return n;
+}
+
+constexpr const char kReplacement[] = "\xEF\xBF\xBD"; // U+FFFD
+
+} // namespace
+
+std::string valid_utf8(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size();) {
+        const size_t n = utf8_sequence(s, i);
+        if (n == 0) {
+            out += kReplacement;
+            ++i;
+        } else {
+            out.append(s.data() + i, n);
+            i += n;
+        }
+    }
+    return out;
+}
+
+void append_string(std::string& out, std::string_view s) {
+    static const char hex[] = "0123456789abcdef";
+    out += '"';
+    for (size_t i = 0; i < s.size();) {
+        const char c = s[i];
+        const uint8_t u = uint8_t(c);
+        if (u >= 0x80) {
+            const size_t n = utf8_sequence(s, i);
+            if (n == 0) {
+                out += kReplacement;
+                ++i;
+            } else {
+                out.append(s.data() + i, n);
+                i += n;
+            }
+            continue;
+        }
+        ++i;
+        switch (c) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        default:
+            if (u < 0x20 || u == 0x7F) {
+                out += "\\u00";
+                out += hex[u >> 4];
+                out += hex[u & 15];
+            } else {
+                out += c;
+            }
+        }
+    }
+    out += '"';
+}
+
+void Value::dump_to(std::string& out) const {
+    switch (type_) {
+    case Type::Null: out += "null"; break;
+    case Type::Bool: out += bool_ ? "true" : "false"; break;
+    case Type::Number: {
+        if (integer_) {
+            out += std::to_string(int_);
+        } else if (!std::isfinite(number_)) {
+            out += "null"; // JSON has no NaN or infinity
+        } else {
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "%.17g", number_);
+            out += buf;
+        }
+        break;
+    }
+    case Type::String: append_string(out, string_); break;
+    case Type::Array:
+        out += '[';
+        for (size_t i = 0; i < array_.size(); ++i) {
+            if (i) out += ',';
+            array_[i].dump_to(out);
+        }
+        out += ']';
+        break;
+    case Type::Object:
+        out += '{';
+        for (size_t i = 0; i < object_.size(); ++i) {
+            if (i) out += ',';
+            append_string(out, object_[i].first);
+            out += ':';
+            object_[i].second.dump_to(out);
+        }
+        out += '}';
+        break;
+    }
+}
+
+std::string Value::dump() const {
+    std::string out;
+    dump_to(out);
+    return out;
 }
 
 const Value* Value::get(std::string_view key) const {
@@ -116,8 +279,16 @@ private:
             const std::string num(s_.substr(start, pos_ - start));
             char* end = nullptr;
             v.number_ = std::strtod(num.c_str(), &end);
-            if (!end || *end) fail("bad number");
+            if (!end || *end || num == "-") fail("bad number");
             v.type_ = Value::Type::Number;
+            if (num.find_first_of(".eE") == std::string::npos) {
+                errno = 0;
+                const long long n = std::strtoll(num.c_str(), &end, 10);
+                if (errno == 0 && end && !*end) {
+                    v.integer_ = true;
+                    v.int_ = n;
+                }
+            }
             return v;
         }
         fail("unexpected character");

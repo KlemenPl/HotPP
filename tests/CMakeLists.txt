@@ -12,10 +12,12 @@ if(TARGET hotpp_host_lib)
     target_sources(hotpp_unit_tests PRIVATE
         unit/compile_db_test.cpp
         unit/deps_test.cpp
+        unit/events_test.cpp
         unit/json_test.cpp
+        unit/mcp_test.cpp
         unit/patch_site_test.cpp
         unit/session_state_test.cpp)
-    target_link_libraries(hotpp_unit_tests PRIVATE hotpp_host_lib)
+    target_link_libraries(hotpp_unit_tests PRIVATE hotpp_mcp_lib hotpp_host_lib)
 
     # The ELF tests link a real object file compiled the way patch compiles are.
     add_library(hotpp_test_link_sample OBJECT unit/data/link_sample.cpp)
@@ -45,8 +47,9 @@ find_package(Python3 COMPONENTS Interpreter)
 if(TARGET hotpp AND Python3_Interpreter_FOUND)
     # SINGLE_HEADER: build the program with single_include/hotpp/hotpp.h instead of
     # linking hotpp_agent (the case provides hotpp_impl.cpp).
+    # MCP: drive the program through hotpp mcp with mcp/run_mcp_test.py instead.
     function(hotpp_e2e_case name)
-        cmake_parse_arguments(ARG "SINGLE_HEADER" "" "" ${ARGN})
+        cmake_parse_arguments(ARG "SINGLE_HEADER;MCP" "" "" ${ARGN})
         set(src ${CMAKE_CURRENT_SOURCE_DIR}/e2e/cases/${name})
         set(work ${CMAKE_CURRENT_BINARY_DIR}/e2e/${name})
         # The program is built from copies in the build tree, which the test edits.
@@ -94,12 +97,17 @@ if(TARGET hotpp AND Python3_Interpreter_FOUND)
             hotpp_enable(hotpp_e2e_${name}_lib)
             target_link_libraries(hotpp_e2e_${name} PRIVATE hotpp_e2e_${name}_lib)
         endif()
+        if(ARG_MCP)
+            set(runner ${CMAKE_CURRENT_SOURCE_DIR}/mcp/run_mcp_test.py)
+        else()
+            set(runner ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_case.py)
+        endif()
         add_test(NAME e2e_${name}
-            COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/e2e/run_case.py
+            COMMAND Python3::Interpreter ${runner}
                 --host $<TARGET_FILE:hotpp> --exe $<TARGET_FILE:hotpp_e2e_${name}>
                 --case ${src} --work ${work}
                 --build-dir ${CMAKE_BINARY_DIR} --target hotpp_e2e_${name})
-        set_tests_properties(e2e_${name} PROPERTIES TIMEOUT 180)
+        set_tests_properties(e2e_${name} PROPERTIES TIMEOUT 240)
     endfunction()
 
     foreach(case
@@ -112,6 +120,9 @@ if(TARGET hotpp AND Python3_Interpreter_FOUND)
     # A program that uses only the single header (no hotpp_agent, no built-in
     # compile_commands path: the agent finds it next to the executable).
     hotpp_e2e_case(single_header SINGLE_HEADER)
+
+    # An AI agent's view: hotpp mcp launching, patching, restarting and stopping it.
+    hotpp_e2e_case(mcp MCP)
 
     # Stepping through patched code needs gdb.
     find_program(HOTPP_GDB gdb)
