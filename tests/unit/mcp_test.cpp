@@ -274,6 +274,29 @@ HOTPP_TEST(control_channel_answers_requests) {
 
         Value status = client->request("status", Value::object(), 5s);
         CHECK(status.get("programs")->as_array().empty());
+
+        // Run mode before the program is started: it hasn't exited, so waiting for
+        // it waits (CI once caught a launch reported as exited this way).
+        host.ctx.run_mode = true;
+        Value wait = Value::object();
+        wait.set("timeout_ms", 200);
+        const auto w0 = std::chrono::steady_clock::now();
+        Value waited = client->request("wait_program", wait, 5s);
+        CHECK(std::chrono::steady_clock::now() - w0 >= 150ms);
+        CHECK(!waited.get("ready")->as_bool());
+        const Value* child = waited.get("host")->get("child");
+        CHECK(child && child->get("running")->as_bool() && !child->get("exit_code"));
+        {
+            std::lock_guard<std::mutex> lock(host.ctx.child.mutex);
+            host.ctx.child.pid = 12345;
+            host.ctx.child.running = false;
+            host.ctx.child.exit_code = 3;
+        }
+        const auto w1 = std::chrono::steady_clock::now();
+        waited = client->request("wait_program", wait, 5s);
+        CHECK(std::chrono::steady_clock::now() - w1 < 150ms); // exited: no wait
+        CHECK(waited.get("host")->get("child")->get("exit_code")->as_integer() == 3);
+        host.ctx.run_mode = false;
         host.ctx.events.add(0, "log", "hello");
         Value p = Value::object();
         p.set("since", 0);

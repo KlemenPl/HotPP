@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 — 2026-11-06
 
-From a trial run with Claude Code:
+Fixes from trial runs with Claude Code, and one race.
+
+- `hotpp_launch` could report a program as exited before the host had even started it, when the MCP server asked too early (seen on a slow CI runner).
 - MCP results are text only unless `hotpp mcp --structured` is given. Claude Code gave the model the structured data instead of the text, which was longer and lacked the guidance.
 - `hotpp_reload` and `hotpp_restart` take `observe_ms`: after the change, wait that long and include what the program printed. `hotpp_output` takes `wait_ms`. The agent had no way to watch the program for a few seconds.
 - A layout warning in `hotpp_reload` comes with plain advice to restart.

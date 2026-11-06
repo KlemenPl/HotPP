@@ -307,9 +307,7 @@ std::vector<Hosts::Program> Hosts::programs(std::vector<Entry>* hosts) {
             }
         // A launched program that exited: its host stays until it's stopped.
         if (e.launched && host)
-            if (const json::Value* child = host->get("child"); child && child->get("running") &&
-                                                               child->get("running")->is_bool() &&
-                                                               !child->get("running")->as_bool()) {
+            if (const json::Value* child = host->get("child"); child && child->get("exit_code")) {
                 Program prog;
                 prog.host = e.client;
                 prog.launched = e.launched;

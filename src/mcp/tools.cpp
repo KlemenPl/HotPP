@@ -606,7 +606,7 @@ ToolResult HotppTools::launch(const Args& a, CallContext& ctx) {
     json::Value structured = r;
     structured.set("command", cmdline);
 
-    if (child && !flag(*child, "running", true)) {
+    if (child && field(*child, "exit_code")) { // it exited (not: it hasn't started yet)
         const std::string text = with_output(cmdline + " exited with code " + std::to_string(num(*child, "exit_code", -1)) +
                                              " before HotPP could patch it.");
         hosts_.forget(launched);

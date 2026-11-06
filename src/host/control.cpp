@@ -27,7 +27,8 @@ json::Value HostContext::host_json() const {
         json::Value c = json::Value::object();
         json::Value cmd = json::Value::array();
         for (const std::string& a : child.command) cmd.push(a);
-        c.set("pid", child.pid).set("command", std::move(cmd)).set("running", child.running);
+        // Not started yet counts as running: it's about to.
+        c.set("pid", child.pid).set("command", std::move(cmd)).set("running", child.running || child.pid == 0);
         if (!child.running && child.pid) c.set("exit_code", child.exit_code);
         h.set("child", std::move(c));
     }
@@ -197,6 +198,12 @@ private:
         std::lock_guard<std::mutex> lock(ctx_.child.mutex);
         return ctx_.child.running;
     }
+    // Started and gone. Not the same as !child_running(): a controller can connect
+    // before the host has started its program.
+    bool child_exited() const {
+        std::lock_guard<std::mutex> lock(ctx_.child.mutex);
+        return ctx_.child.pid != 0 && !ctx_.child.running;
+    }
 
     // Waits for `req`, passing the program's log lines on as progress. False on
     // timeout or when the controller goes away.
@@ -228,7 +235,7 @@ private:
                     found = h;
                     return true;
                 }
-                return ctx_.run_mode && !child_running();
+                return ctx_.run_mode && child_exited();
             },
             std::max(left, 0ms), &closing_);
         return found;
@@ -321,7 +328,7 @@ private:
                 if (auto next = wait_for_return(pid, h->session(), deadline)) {
                     r.set("outcome", "restarted");
                     r.set("program", next->info().to_json());
-                } else if (ctx_.run_mode && !child_running()) {
+                } else if (ctx_.run_mode && child_exited()) {
                     r.set("outcome", "exited");
                     r.set("error", "the program exited instead of coming back");
                 } else {
@@ -395,7 +402,7 @@ private:
                         ready = h;
                         return true;
                     }
-                return ctx_.run_mode && !child_running();
+                return ctx_.run_mode && child_exited();
             },
             timeout, &closing_);
         json::Value r = json::Value::object();
