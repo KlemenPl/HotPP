@@ -16,6 +16,7 @@
 
 #include <csignal>
 
+#include <cxxabi.h>
 #include <unistd.h>
 
 namespace hotpp::host {
@@ -117,6 +118,15 @@ std::string read_file(const fs::path& p) {
 bool is_header(const fs::path& p) {
     static const std::set<std::string> kExt = {".h", ".hh", ".hpp", ".hxx", ".h++", ".inl", ".ipp", ".tpp"};
     return kExt.count(p.extension().string()) != 0;
+}
+
+std::string demangle(const std::string& name) {
+    int status = 0;
+    char* d = abi::__cxa_demangle(name.c_str(), nullptr, nullptr, &status);
+    std::string out = status == 0 && d ? d : name;
+    std::free(d);
+    if (out.find('(') == std::string::npos) out += "()";
+    return out;
 }
 
 std::string ms_since(Clock::time_point t) {
@@ -297,6 +307,12 @@ Session::Outcome Session::run(const std::vector<uint8_t>& hello_payload) {
                     std::lock_guard<std::mutex> lock(reply_mutex_);
                     module_changes_.push_back(std::move(change));
                     has_module_changes_ = true;
+                }
+            } else if (h.type == MsgType::ActiveFrames) {
+                ActiveFrames frames;
+                if (decode(mr, frames)) {
+                    std::lock_guard<std::mutex> lock(reply_mutex_);
+                    frames_[frames.id] = std::move(frames.addresses);
                 }
             } else if (h.type == MsgType::ReserveReply) {
                 ReserveReply rep;
@@ -1069,6 +1085,47 @@ std::shared_ptr<PatchReport> Session::handle_changes(const std::vector<fs::path>
     if (!result)
         return finish("not_applied", "the program disconnected", patch_name + " not applied: the program disconnected");
     if (!result->ok) return finish("failed_in_app", result->error, patch_name + " failed in the app: " + result->error);
+    // Functions the patch replaced that are running on the thread that applied it
+    // (sync_point()'s callers, e.g. main()): the running calls keep their old code.
+    std::vector<uint64_t> frames;
+    {
+        std::lock_guard<std::mutex> lock(reply_mutex_);
+        auto it = frames_.find(id);
+        if (it != frames_.end()) {
+            frames = std::move(it->second);
+            frames_.erase(it);
+        }
+    }
+    std::vector<std::string> running;
+    for (uint64_t addr : frames) {
+        for (ModuleLink& l : links) {
+            const ModuleRecord& rec = hello_.modules[l.module->index];
+            if (addr <= rec.start || addr > rec.start + rec.size) continue;
+            const uint64_t at = addr - 1 - rec.base; // a return address can be just past a noreturn call
+            for (const image::ImageSymbol& sym : l.module->image->symbols()) {
+                if (sym.type != elf::STT_FUNC || sym.size == 0 || at < sym.value || at - sym.value >= sym.size) continue;
+                const uint64_t lo = rec.base + sym.value, hi = lo + sym.size;
+                const bool replaced = std::any_of(l.result.patch.sites.begin(), l.result.patch.sites.end(),
+                                                  [&](const PatchSite& s) { return s.entry_addr >= lo && s.entry_addr < hi; });
+                const std::string name = demangle(sym.name);
+                if (replaced && std::find(running.begin(), running.end(), name) == running.end()) running.push_back(name);
+                break;
+            }
+        }
+    }
+    if (!running.empty()) {
+        std::string names;
+        for (size_t i = 0; i < running.size(); ++i)
+            names += (i == 0 ? "" : i + 1 == running.size() ? " and " : ", ") + running[i];
+        const std::string warning =
+            names + (running.size() == 1 ? " is" : " are") +
+            " running (the program called hotpp::sync_point() from there): the running call keeps its old code "
+            "until it returns, so changes to " + (running.size() == 1 ? "it" : "them") +
+            " take effect only in later calls. If you changed it, restart, or move the changed code into a function "
+            "it calls";
+        say("warning: " + warning);
+        report->warnings.push_back(warning);
+    }
     for (ModuleLink& l : links) {
         l.module->symbols.apply(l.result.delta);
         applied_.emplace_back(uint32_t(l.module->index), l.result.delta);

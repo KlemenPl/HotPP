@@ -31,6 +31,8 @@ enum class MsgType : uint16_t {
     ReserveReply = 10,  // agent -> host
     Restart = 11,       // host -> agent: exec the (rebuilt) executable again
     ModulesChanged = 12, // agent -> host: libraries were loaded or unloaded (dlopen/dlclose)
+    ActiveFrames = 13,   // agent -> host, before a PatchResult: the call stack the patch was applied on
+                         // (hosts that don't know it ignore it, so the version stays)
     // Controllers (hotpp mcp) use the host's socket too: their first message is a
     // ControlHello, then both sides exchange JSON in Control messages. Agents never
     // see these; the version field doesn't apply to them (see host/control_protocol.h).

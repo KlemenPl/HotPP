@@ -100,6 +100,7 @@ The host listens and agents connect. One host serves any number of agents.
 | `PatchResult` | agent → host | id, ok, error |
 | `Restart` | host → agent | re-exec the (rebuilt) executable (§8.8) |
 | `ModulesChanged` | agent → host | libraries loaded or unloaded at runtime (§6) |
+| `ActiveFrames` | agent → host | before a `PatchResult` from `sync_point()`: the return addresses on that thread's stack. Hosts that don't know the type ignore it, so the protocol version stayed. |
 | `Log`, `Bye` | both | text for the user; orderly disconnect |
 
 ### 3.3 Host restarts and reconnecting
@@ -542,6 +543,7 @@ Each milestone ends with a git commit, pushed to the Gitea remote, once its "don
 - `__attribute__((destructor))` functions in a patch aren't registered.
 - Threads that block real-time signals can't be paused, so patches fail while such threads exist.
 - A library unloaded with `dlclose` and loaded again is a new module: patches applied to its earlier copy are gone.
+- A running call keeps its old code: a patch redirects *new* calls. For the thread that calls `sync_point()` (e.g. `main()`, or a loop calling it) the host knows which functions are running: the agent sends `backtrace()` of `sync_point()`'s callers in `ActiveFrames`. If the patch replaced one of them, the host warns. Other threads' running functions aren't detected.
 
 ---
 
@@ -592,6 +594,7 @@ The program checks its invariants every frame (state never resets, old and new r
 | `hooks` | Pre/post-patch hooks run exactly once per patch; a changed hook body takes effect; a hook added by a patch is registered and runs. |
 | `async` | In async mode, a patch applies while the main thread spins in a loop that never reaches `sync_point()`. |
 | `layout_warning` | A struct that grows in a header triggers the layout warning, and the patch still applies. |
+| `running_loop` | A patch that replaces the function `sync_point()` was called from, while it runs, warns that the running call keeps its old code; later calls run the new code. |
 | `shared_lib` | Code in a shared library (`lib_*.cpp` in the case) is patched: its global (copy-relocated into the executable), `static` and `thread_local` keep their values, and it calls back into the executable. |
 | `restart` | A resized global is rebuilt and restarted with `--build … --auto-restart`; the pre-restart hook saves state, the restarted process (same pid) sees `restarted()`, reads it back and runs the new code. The harness rebuilds the program from v1 afterwards. |
 | `single_header` | A program built with only the single header (no agent library, no `compile_commands.json` path built in) connects, finds `compile_commands.json` itself, is patched and runs its hook. |
@@ -626,7 +629,7 @@ The program checks its invariants every frame (state never resets, old and new r
 - `initialize` returns the `tools` capability and `instructions` on how to use HotPP. The server also answers `ping`, `tools/list` and `tools/call`, and accepts `notifications/initialized` and `notifications/cancelled`; a cancelled call gets no reply.
 - `notifications/progress` messages carry the host's log lines when the call has a `progressToken`. Batches (2025-03-26) are answered as one array.
 - Standard error codes for bad messages: -32700, -32600, -32601, -32602. Tool failures are results with `isError: true` and a message the model can act on, including bad arguments (each tool's `inputSchema` is strict).
-- Tool calls run on worker threads, at most 16 at once (more are turned away with an error result). Results carry readable `text`, with compiler output verbatim, and the raw host data as `structuredContent`.
+- Tool calls run on worker threads, at most 16 at once (more are turned away with an error result). Results carry readable `text`, with compiler output verbatim and advice on what to do next. With `--structured` they also carry the raw host data as `structuredContent`. That's off by default: Claude Code gives the model `structuredContent` *instead of* the text when both are present. That costs more tokens and drops the advice, which was seen in a trial run.
 - **stdout carries only protocol.** At startup it is duplicated to a private descriptor and fd 1 is pointed at stderr, so nothing else can corrupt the stream. Children never inherit it.
 - Lines over 16 MiB are refused and skipped to the next newline. `SIGPIPE` is ignored.
 - End of input lets calls in progress finish; `SIGTERM`, `SIGINT` or `SIGHUP` cancel them. Either way, launched programs are stopped before it exits.
@@ -652,11 +655,11 @@ It then waits for `wait_program` and reports the result:
 | Tool | Notes |
 |---|---|
 | `hotpp_status` | all programs and hosts; read-only |
-| `hotpp_reload` | as §3.4; reports earlier patches the agent hasn't seen (cursor per host and pid) |
+| `hotpp_reload` | as §3.4; reports earlier patches the agent hasn't seen (cursor per host and pid); `observe_ms` appends the output printed right after the patch; a layout warning comes with advice to restart |
 | `hotpp_launch` | `command`, `cwd`, `env`, `build_command` (default `--build`), `auto_restart`, `auto_reload` (default off) |
-| `hotpp_restart` | `rebuild` (default true); waits until the program is back |
+| `hotpp_restart` | `rebuild` (default true); waits until the program is back; `observe_ms` as above |
 | `hotpp_stop` | only programs this server launched |
-| `hotpp_output` | only captured (launched) programs; cursor or last lines |
+| `hotpp_output` | only captured (launched) programs; cursor or last lines; `wait_ms` returns what it prints during the wait |
 | `hotpp_logs` | cursor and long poll |
 | `hotpp_set_auto_reload` | temporary on hosts the user started (§3.4) |
 

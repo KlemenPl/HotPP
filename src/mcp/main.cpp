@@ -41,6 +41,7 @@ constexpr const char* kUsage =
     "  --build <command>   default rebuild command for launched programs (/bin/sh -c)\n"
     "  --endpoint <path>   also control the host listening there (repeatable)\n"
     "  --no-launch         don't start, stop or restart programs; only observe and patch\n"
+    "  --structured        also return structuredContent (for scripts; agents read the text)\n"
     "  --version           print the version and exit\n";
 
 constexpr size_t kMaxLine = 16u << 20;
@@ -73,6 +74,8 @@ int run(int argc, char** argv) {
             hosts_options.endpoints.push_back(argv[++i]);
         } else if (a == "--no-launch") {
             restricted = true;
+        } else if (a == "--structured") {
+            tools_options.structured = true;
         } else if (a == "--version") {
             std::printf("hotpp mcp %s\n", HOTPP_VERSION);
             return 0;

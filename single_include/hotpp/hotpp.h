@@ -155,6 +155,8 @@ enum class MsgType : uint16_t {
     ReserveReply = 10,  // agent -> host
     Restart = 11,       // host -> agent: exec the (rebuilt) executable again
     ModulesChanged = 12, // agent -> host: libraries were loaded or unloaded (dlopen/dlclose)
+    ActiveFrames = 13,   // agent -> host, before a PatchResult: the call stack the patch was applied on
+                         // (hosts that don't know it ignore it, so the version stays)
     // Controllers (hotpp mcp) use the host's socket too: their first message is a
     // ControlHello, then both sides exchange JSON in Control messages. Agents never
     // see these; the version field doesn't apply to them (see host/control_protocol.h).
@@ -397,6 +399,14 @@ struct PatchResult {
     std::string error;
 };
 
+// Return addresses on the stack of the thread that applied patch `id` (in
+// sync_point(), the program's own thread). Functions among them keep running their
+// old code until they return, even if the patch replaced them.
+struct ActiveFrames {
+    uint32_t id = 0;
+    std::vector<uint64_t> addresses;
+};
+
 // Modules keep their index for the life of the process: loaded ones are appended
 // (starting at first_index), unloaded ones are listed and never reused.
 struct ModulesChanged {
@@ -599,6 +609,21 @@ inline bool decode(Reader& r, PatchResult& m) {
     m.id = r.u32();
     m.ok = r.u8() != 0;
     m.error = get_string(r);
+    return r.ok() && r.at_end();
+}
+
+inline void encode(Writer& w, const ActiveFrames& m) {
+    w.u32(m.id);
+    w.u32(uint32_t(m.addresses.size()));
+    for (uint64_t a : m.addresses) w.u64(a);
+}
+
+inline bool decode(Reader& r, ActiveFrames& m) {
+    m.id = r.u32();
+    const uint32_t n = r.u32();
+    if (!r.ok() || n > r.remaining() / 8) return false;
+    m.addresses.resize(n);
+    for (uint64_t& a : m.addresses) a = r.u64();
     return r.ok() && r.at_end();
 }
 
@@ -1677,6 +1702,7 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
 #include <algorithm>
 #include <atomic>
 #include <climits>
+#include <cstdint>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -1684,6 +1710,7 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
 #include <string>
 #include <vector>
 
+#include <execinfo.h>
 #include <unistd.h>
 
 namespace hotpp {
@@ -1816,7 +1843,9 @@ void restart_now() {
     agent::log("hot restart failed: %s; the program keeps running without hot reload", error.c_str());
 }
 
-void apply_and_report(const Patch& patch) {
+// `frames`: return addresses of the thread applying the patch (sync_point()'s
+// callers), or empty in async mode.
+void apply_and_report(const Patch& patch, const std::vector<uint64_t>& frames = {}) {
     AgentState& s = state();
     run_hooks(detail::HookKind::PrePatch);
     PatchResult result;
@@ -1841,6 +1870,14 @@ void apply_and_report(const Patch& patch) {
     }
     if (result.ok) run_hooks(detail::HookKind::PostPatch);
     else agent::log("patch %u failed: %s", unsigned(patch.id), result.error.c_str());
+    if (result.ok && !frames.empty() && s.connected) {
+        ActiveFrames active;
+        active.id = patch.id;
+        active.addresses = frames;
+        Writer fw;
+        encode(fw, active);
+        send_message(s, MsgType::ActiveFrames, fw);
+    }
     Writer w;
     encode(w, result);
     if (s.connected) send_message(s, MsgType::PatchResult, w);
@@ -2155,7 +2192,13 @@ void sync_point() {
         todo.swap(s.pending);
         s.has_pending = false;
     }
-    for (const Patch& patch : todo) apply_and_report(patch);
+    // The functions that called sync_point() keep running their old code until they
+    // return; the host tells the user if the patch changed one of them.
+    void* stack[64];
+    const int depth = backtrace(stack, 64);
+    std::vector<uint64_t> frames;
+    for (int i = 1; i < depth; ++i) frames.push_back(uint64_t(reinterpret_cast<uintptr_t>(stack[i])));
+    for (const Patch& patch : todo) apply_and_report(patch, frames);
     if (s.restart_pending.exchange(false)) restart_now();
 }
 

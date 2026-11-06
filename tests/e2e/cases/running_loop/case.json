@@ -1,0 +1,15 @@
+{
+  "steps": [
+    {
+      "name": "replace the function sync_point() was called from",
+      "copy": {
+        "loop.cpp": "v2/loop.cpp"
+      },
+      "expect": [
+        "warning: inner_loop\\(\\) is running",
+        "^\\[hotpp\\] patch 1 applied",
+        "^value 2$"
+      ]
+    }
+  ]
+}

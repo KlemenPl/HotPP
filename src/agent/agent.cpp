@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <climits>
+#include <cstdint>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -17,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include <execinfo.h>
 #include <unistd.h>
 
 namespace hotpp {
@@ -149,7 +151,9 @@ void restart_now() {
     agent::log("hot restart failed: %s; the program keeps running without hot reload", error.c_str());
 }
 
-void apply_and_report(const Patch& patch) {
+// `frames`: return addresses of the thread applying the patch (sync_point()'s
+// callers), or empty in async mode.
+void apply_and_report(const Patch& patch, const std::vector<uint64_t>& frames = {}) {
     AgentState& s = state();
     run_hooks(detail::HookKind::PrePatch);
     PatchResult result;
@@ -174,6 +178,14 @@ void apply_and_report(const Patch& patch) {
     }
     if (result.ok) run_hooks(detail::HookKind::PostPatch);
     else agent::log("patch %u failed: %s", unsigned(patch.id), result.error.c_str());
+    if (result.ok && !frames.empty() && s.connected) {
+        ActiveFrames active;
+        active.id = patch.id;
+        active.addresses = frames;
+        Writer fw;
+        encode(fw, active);
+        send_message(s, MsgType::ActiveFrames, fw);
+    }
     Writer w;
     encode(w, result);
     if (s.connected) send_message(s, MsgType::PatchResult, w);
@@ -488,7 +500,13 @@ void sync_point() {
         todo.swap(s.pending);
         s.has_pending = false;
     }
-    for (const Patch& patch : todo) apply_and_report(patch);
+    // The functions that called sync_point() keep running their old code until they
+    // return; the host tells the user if the patch changed one of them.
+    void* stack[64];
+    const int depth = backtrace(stack, 64);
+    std::vector<uint64_t> frames;
+    for (int i = 1; i < depth; ++i) frames.push_back(uint64_t(reinterpret_cast<uintptr_t>(stack[i])));
+    for (const Patch& patch : todo) apply_and_report(patch, frames);
     if (s.restart_pending.exchange(false)) restart_now();
 }
 

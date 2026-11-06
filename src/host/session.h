@@ -158,6 +158,7 @@ private:
     std::map<uint32_t, proto::PatchResult> results_;
     std::map<uint32_t, proto::ResolveReply> resolved_;
     std::map<uint32_t, proto::ReserveReply> reserved_;
+    std::map<uint32_t, std::vector<uint64_t>> frames_; // ActiveFrames, by patch id
     std::vector<proto::ModulesChanged> module_changes_; // for the watcher thread
     std::atomic<bool> has_module_changes_{false};
     bool disconnected_ = false;

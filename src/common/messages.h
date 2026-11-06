@@ -82,6 +82,14 @@ struct PatchResult {
     std::string error;
 };
 
+// Return addresses on the stack of the thread that applied patch `id` (in
+// sync_point(), the program's own thread). Functions among them keep running their
+// old code until they return, even if the patch replaced them.
+struct ActiveFrames {
+    uint32_t id = 0;
+    std::vector<uint64_t> addresses;
+};
+
 // Modules keep their index for the life of the process: loaded ones are appended
 // (starting at first_index), unloaded ones are listed and never reused.
 struct ModulesChanged {
@@ -284,6 +292,21 @@ inline bool decode(Reader& r, PatchResult& m) {
     m.id = r.u32();
     m.ok = r.u8() != 0;
     m.error = get_string(r);
+    return r.ok() && r.at_end();
+}
+
+inline void encode(Writer& w, const ActiveFrames& m) {
+    w.u32(m.id);
+    w.u32(uint32_t(m.addresses.size()));
+    for (uint64_t a : m.addresses) w.u64(a);
+}
+
+inline bool decode(Reader& r, ActiveFrames& m) {
+    m.id = r.u32();
+    const uint32_t n = r.u32();
+    if (!r.ok() || n > r.remaining() / 8) return false;
+    m.addresses.resize(n);
+    for (uint64_t& a : m.addresses) a = r.u64();
     return r.ok() && r.at_end();
 }
 

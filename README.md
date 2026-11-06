@@ -143,10 +143,10 @@ Use the full path to `hotpp` if it isn't on the agent's `PATH`. Then ask the age
 | Tool | |
 |---|---|
 | `hotpp_launch` | Start a program under HotPP, e.g. `["./build/game"]`, and wait until it can be patched. |
-| `hotpp_reload` | Apply every changed source and header as one patch; returns success, the compiler's errors, or that a restart is needed. |
+| `hotpp_reload` | Apply every changed source and header as one patch; returns success, the compiler's errors, or that a restart is needed. `observe_ms` adds what the program prints right after. |
 | `hotpp_restart` | Rebuild (with the build command) and restart the program in place. |
 | `hotpp_status` | Programs under HotPP: what they watch, whether they run the sources on disk, the last patch. |
-| `hotpp_output` | What a launched program printed. |
+| `hotpp_output` | What a launched program printed; `wait_ms` watches it for a while. |
 | `hotpp_logs` | The host's messages and patch history; can wait for new ones. |
 | `hotpp_set_auto_reload` | Patch on every save, or only on `hotpp_reload`. |
 | `hotpp_stop` | Stop a launched program. |
@@ -156,6 +156,7 @@ How it behaves:
 - **Programs you start** with `hotpp -- ./game`, a `hotpp` in a terminal, or a host the agent library launched are found too. The agent can patch and restart them, but not stop them or read their output. If it turns auto-reload off on your host, the setting reverts when the MCP server exits.
 - `--no-launch` limits the agent to programs you start yourself.
 - `--endpoint <path>` adds a host on a socket outside the usual place.
+- `--structured` also returns machine-readable results (`structuredContent`), for scripts. It's off by default because some clients, Claude Code among them, give the model that data instead of the text.
 
 ## What needs a restart
 
@@ -164,7 +165,7 @@ HotPP rejects these and leaves the program untouched (with `--auto-restart`, it 
 - a new `thread_local`
 - a new use of a shared-library variable the program didn't use before (GCC)
 
-It **warns** when a struct's layout changes (a header gains a member): objects created before the patch keep the old layout. When a file gains a dynamically initialized global, that file's other initializers re-run into scratch copies, so their side effects repeat.
+It **warns** when a struct's layout changes (a header gains a member): objects created before the patch keep the old layout. It also warns when a patch replaces a function that is running, such as `main()` or a loop that calls `sync_point()`: the running call keeps its old code until it returns. Put per-frame code in functions the loop calls. When a file gains a dynamically initialized global, that file's other initializers re-run into scratch copies, so their side effects repeat.
 
 ## Tips
 

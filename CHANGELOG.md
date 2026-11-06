@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+From a trial run with Claude Code:
+- MCP results are text only unless `hotpp mcp --structured` is given. Claude Code gave the model the structured data instead of the text, which was longer and lacked the guidance.
+- `hotpp_reload` and `hotpp_restart` take `observe_ms`: after the change, wait that long and include what the program printed. `hotpp_output` takes `wait_ms`. The agent had no way to watch the program for a few seconds.
+- A layout warning in `hotpp_reload` comes with plain advice to restart.
+- The host warns when a patch replaces a function that is running on the thread that applied it, such as `main()` or a loop calling `sync_point()`: that call keeps its old code. The agent had changed `main()`'s loop and saw no effect. The agent library sends a new `ActiveFrames` message; older hosts ignore it, and older agents still work.
+
 ## 1.1.0 — 2026-11-06
 
 AI coding agents can use HotPP: `hotpp mcp` is a Model Context Protocol server.

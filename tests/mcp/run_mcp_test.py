@@ -154,7 +154,7 @@ def main():
     env = dict(os.environ, XDG_RUNTIME_DIR=runtime)
     env.pop("HOTPP_ENDPOINT", None)
     build = f"cmake --build {args.build_dir} --target {args.target}"
-    mcp_cmd = [args.host, "mcp", "--build", build]
+    mcp_cmd = [args.host, "mcp", "--structured", "--build", build]
     rebuilt = False
     others = []
     client = None
@@ -233,9 +233,11 @@ def main():
         m = wait_output(r"value=(\d) label=(\w+) counter=(\d+)")
         check(m.group(1) == "1", "patched although auto-reload is off")
 
-        res = client.tool("hotpp_reload", pid=pid)
+        res = client.tool("hotpp_reload", pid=pid, observe_ms=600)
         sc = res["structuredContent"]
         check(not res["isError"] and sc["outcome"] == "applied", "reload of two files", text_of(res))
+        check("Output over the next 600 ms" in text_of(res) and "value=2 label=two" in text_of(res),
+              "observe_ms shows the patched program's output", text_of(res))
         check(len(sc["report"]["files"]) == 2, "both files in one patch", json.dumps(sc["report"]))
         check(sc["in_sync"], "in sync after the patch")
         before = int(m.group(3))
@@ -244,6 +246,10 @@ def main():
 
         res = client.tool("hotpp_reload")
         check(not res["isError"] and res["structuredContent"]["outcome"] == "up_to_date", "nothing to do")
+        t0 = time.monotonic()
+        res = client.tool("hotpp_output", wait_ms=400)
+        check(time.monotonic() - t0 >= 0.35 and "value=2" in text_of(res), "hotpp_output waits and watches",
+              text_of(res))
 
         # --- a compile error, then the fix ---------------------------------------
         put("broken", "game.cpp")

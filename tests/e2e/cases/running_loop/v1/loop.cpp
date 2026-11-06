@@ -1,0 +1,18 @@
+#include <hotpp/hotpp.h>
+
+#include <chrono>
+#include <cstdio>
+#include <thread>
+
+int patches_applied();
+int value() { return 1; }
+
+void inner_loop() {
+    std::printf("inner loop\n");
+    std::fflush(stdout);
+    const int start = patches_applied();
+    while (patches_applied() == start) {
+        hotpp::sync_point();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}

@@ -18,10 +18,14 @@ std::string instructions() {
            "- After editing a running program's .cpp files or headers, call hotpp_reload. It applies every change "
            "as one patch and reports compile errors, changes that need a restart, or success. Programs started with "
            "hotpp_launch only change when you call hotpp_reload (auto-reload is off), so finish a multi-file edit "
-           "first. Don't rebuild with the build system to apply an edit; that needs a restart.\n"
+           "first. Pass observe_ms (e.g. 2000) to also see what the program prints right after the patch. Don't "
+           "rebuild with the build system to apply an edit; that needs a restart.\n"
+           "- A layout warning (a struct or class gained or lost members) means objects created before the patch "
+           "have the old layout: restart unless none of them is still in use.\n"
            "- If a change can't be patched (restart required: e.g. a global changed size or type), call "
            "hotpp_restart: it rebuilds and restarts the program with the same pid; program state is lost.\n"
-           "- hotpp_output shows what a launched program printed; hotpp_logs shows the host's messages and patch "
+           "- hotpp_output shows what a launched program printed (wait_ms watches it for a while); hotpp_logs shows "
+           "the host's messages and patch "
            "history. hotpp_stop ends a launched program. Launched programs stop when this server exits.";
 }
 
@@ -312,8 +316,13 @@ HotppTools::HotppTools(Hosts& hosts, ToolsOptions options) : hosts_(hosts), opti
         {"hotpp_reload", "Apply source changes",
          "Recompile every source file and header changed since the last patch and patch them into the running "
          "program as one patch. Reports success, compile errors (with the compiler output), or that a restart is "
-         "needed. Call it after editing a running program's sources.",
+         "needed. Call it after editing a running program's sources; with observe_ms it also shows what the "
+         "program prints right after the patch.",
          {pid,
+          {"observe_ms", Param::Integer,
+           "After a successful patch, wait this long and include what the program printed meanwhile (programs "
+           "started with hotpp_launch). E.g. 2000.",
+           false, 0, 60000},
           {"timeout_ms", Param::Integer, "How long to wait for the patch (default 60000).", false, 0, 600000}},
          false, false, false, &HotppTools::reload},
         {"hotpp_launch", "Launch a program",
@@ -337,6 +346,10 @@ HotppTools::HotppTools(Hosts& hosts, ToolsOptions options) : hosts_(hosts), opti
          "same arguments, program state reset. Use it when hotpp_reload says a restart is required.",
          {pid,
           {"rebuild", Param::Boolean, "Run the build command first (default true)."},
+          {"observe_ms", Param::Integer,
+           "After the restart, wait this long and include what the program printed meanwhile (programs started "
+           "with hotpp_launch).",
+           false, 0, 60000},
           {"timeout_ms", Param::Integer, "How long to wait for the build and the restart (default 300000).", false, 0,
            600000}},
          false, true, false, &HotppTools::restart},
@@ -347,9 +360,14 @@ HotppTools::HotppTools(Hosts& hosts, ToolsOptions options) : hosts_(hosts), opti
          false, true, true, &HotppTools::stop},
         {"hotpp_output", "Program output",
          "What a program started with hotpp_launch printed (stdout and stderr). Without 'since', returns the end of "
-         "the output; pass the returned cursor as 'since' to read only what's new.",
+         "the output; pass the returned cursor as 'since' to read only what's new. With 'wait_ms', watches the "
+         "program for that long and returns what it printed meanwhile.",
          {pid,
           {"since", Param::Integer, "Cursor from an earlier call: return output after it.", false, 0, INT64_MAX},
+          {"wait_ms", Param::Integer,
+           "Wait this long first (ends early if the program exits) and return what it printed during the wait, or "
+           "since 'since'. E.g. 3000 to watch it run for 3 seconds.",
+           false, 0, 60000},
           {"max_bytes", Param::Integer, "At most this much text (default 16384).", false, 1, 1 << 20},
           {"tail_lines", Param::Integer, "Only the last N lines (without 'since').", false, 1, 100000}},
          true, false, false, &HotppTools::output},
@@ -395,12 +413,14 @@ ToolResult HotppTools::call(const std::string& name, const json::Value& argument
     if (t == tools_.end()) return error("unknown tool " + name);
     const std::string problem = validate(*t, arguments);
     if (!problem.empty()) return error("Invalid arguments: " + problem + ".");
+    ToolResult result;
     try {
-        return (this->*(t->run))(Args(arguments), ctx);
+        result = (this->*(t->run))(Args(arguments), ctx);
     } catch (const HostError& e) {
-        if (ctx.is_cancelled()) return error("cancelled");
-        return error(e.what());
+        result = error(ctx.is_cancelled() ? "cancelled" : e.what());
     }
+    if (!options_.structured) result.structured = json::Value();
+    return result;
 }
 
 ToolResult HotppTools::status(const Args&, CallContext&) {
@@ -517,7 +537,18 @@ ToolResult HotppTools::reload(const Args& a, CallContext& ctx) {
     if (outcome != "applied" && outcome != "up_to_date" && !flag(r, "in_sync", true) && outcome != "out_of_sync" &&
         outcome != "waiting_for_sync_point")
         text += "\n(" + name + " doesn't run all sources on disk.)";
+    if (report && outcome == "applied")
+        for (const std::string& w : strs(*report, "warnings"))
+            if (w.rfind("layout of ", 0) == 0) {
+                text += "\n\nImportant: a struct or class changed layout. The patched code now uses the new layout, "
+                        "also on objects created before the patch (globals, objects on the heap, locals of functions "
+                        "still running such as main), which can corrupt memory. Unless no such object exists, call "
+                        "hotpp_restart now.";
+                break;
+            }
     text += recent_text;
+    if (outcome == "applied" || (outcome == "restart_required" && flag(r, "restarted")))
+        text += observe(p, a.integer("observe_ms", 0), ctx);
     json::Value structured = r;
     return failed ? error(text, std::move(structured)) : ok(text, std::move(structured));
 }
@@ -622,6 +653,7 @@ ToolResult HotppTools::restart(const Args& a, CallContext& ctx) {
         if (rebuild && !built)
             text += "\nThe host has no build command, so it restarted the program as built (pass build_command to "
                     "hotpp_launch, or start hotpp mcp with --build, to rebuild first).";
+        text += observe(p, a.integer("observe_ms", 0), ctx);
         return ok(text, r);
     }
     if (outcome == "build_failed")
@@ -654,7 +686,26 @@ ToolResult HotppTools::stop(const Args& a, CallContext& ctx) {
               r);
 }
 
-ToolResult HotppTools::output(const Args& a, CallContext&) {
+// What the program prints during the next `ms_to_watch` ms, for appending to a result.
+std::string HotppTools::observe(const Hosts::Program& p, int64_t ms_to_watch, CallContext& ctx) {
+    if (ms_to_watch <= 0) return {};
+    if (!flag(p.host_info, "captures_output"))
+        return "\n\n(observe_ms: output isn't captured for programs not started with hotpp_launch)";
+    json::Value params = json::Value::object();
+    params.set("wait_ms", ms_to_watch).set("max_bytes", 8192);
+    try {
+        const json::Value r = p.host->request("output", std::move(params), ms(ms_to_watch) + kSlack, {}, ctx.cancelled);
+        const std::string text = str(r, "text");
+        std::string out = "\n\nOutput over the next " + std::to_string(ms_to_watch) + " ms:\n" +
+                          (text.empty() ? std::string("(nothing)") : fenced(text));
+        if (num(r, "next") - num(r, "start") >= 8192) out += "\n(more followed; hotpp_output shows the rest)";
+        return out + "\n[pass since=" + std::to_string(num(r, "next")) + " to hotpp_output to read on]";
+    } catch (const HostError& e) {
+        return std::string("\n\n(couldn't read the output: ") + e.what() + ")";
+    }
+}
+
+ToolResult HotppTools::output(const Args& a, CallContext& ctx) {
     const Hosts::Program p = hosts_.find(a.pid(), true);
     if (!flag(p.host_info, "captures_output"))
         return error("Output of pid " + std::to_string(p.pid) + " (" + program_name(p) +
@@ -664,7 +715,9 @@ ToolResult HotppTools::output(const Args& a, CallContext&) {
     params.set("max_bytes", a.integer("max_bytes", 16384));
     if (a.has("since")) params.set("since", a.integer("since", 0));
     else if (a.has("tail_lines")) params.set("tail_lines", a.integer("tail_lines", 0));
-    const json::Value r = p.host->request("output", std::move(params), 10s);
+    const int64_t wait = a.integer("wait_ms", 0);
+    if (wait) params.set("wait_ms", wait);
+    const json::Value r = p.host->request("output", std::move(params), ms(wait) + kSlack, {}, ctx.cancelled);
     std::string text = str(r, "text");
     const int64_t start = num(r, "start"), next = num(r, "next"), dropped = num(r, "dropped");
     std::string footer = "[output bytes " + std::to_string(start) + "-" + std::to_string(next);

@@ -358,10 +358,18 @@ private:
                                "hotpp_launch do)");
         const size_t max_bytes = size_t(int_param(p, "max_bytes", 16384, 1, 1 << 20));
         const size_t lines = size_t(int_param(p, "tail_lines", 0, 0, 100000));
+        const auto wait = std::chrono::milliseconds(int_param(p, "wait_ms", 0, 0, kMaxTimeoutMs));
         const json::Value* since = p.get("since");
-        const OutputBuffer::Chunk c = since && !since->is_null()
-                                          ? ctx_.output->read(uint64_t(int_param(p, "since", 0, 0, INT64_MAX)), max_bytes)
-                                          : ctx_.output->tail(lines, max_bytes);
+        const bool from = since && !since->is_null();
+        // With wait_ms: what the program prints during the wait (from `since`, or from
+        // now), returned early if it exits.
+        uint64_t start = from ? uint64_t(int_param(p, "since", 0, 0, INT64_MAX)) : ctx_.output->end();
+        if (wait.count() > 0) {
+            std::unique_lock<std::mutex> lock(ctx_.child.mutex);
+            ctx_.child.cv.wait_for(lock, wait, [&] { return !ctx_.child.running || closing_.load(); });
+        }
+        const OutputBuffer::Chunk c = from || wait.count() > 0 ? ctx_.output->read(start, max_bytes)
+                                                               : ctx_.output->tail(lines, max_bytes);
         json::Value r = json::Value::object();
         r.set("text", strip_ansi(c.text)).set("start", c.start).set("next", c.next).set("dropped", c.dropped);
         r.set("closed", c.closed).set("host", ctx_.host_json());

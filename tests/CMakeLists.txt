@@ -112,7 +112,7 @@ if(TARGET hotpp AND Python3_Interpreter_FOUND)
 
     foreach(case
             state new_global header_inline virtual_change lambda_template exceptions
-            thread_spin repeat tls restart_required compile_error hooks async layout_warning
+            thread_spin repeat tls restart_required compile_error hooks async layout_warning running_loop
             shared_lib restart host_restart dlopen_plugin)
         hotpp_e2e_case(${case})
     endforeach()
