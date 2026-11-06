@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.1.2 — 2026-11-06
 
-- HotPP is now under the MIT license (it was proprietary). The single header carries the license text.
+- HotPP is under the MIT license (1.1.1 and earlier were proprietary). The single header carries the license text, since it is often copied into a project on its own.
 
 ## 1.1.1 — 2026-11-06
 
