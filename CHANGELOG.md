@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- HotPP is now under the MIT license (it was proprietary). The single header carries the license text.
+
 ## 1.1.1 — 2026-11-06
 
 Fixes from trial runs with Claude Code, and one race.

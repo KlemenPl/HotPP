@@ -191,4 +191,4 @@ cmake --build build --target hotpp_single_header   # after changing the agent
 
 ## License
 
-Proprietary. Copyright (c) 2026 HotPP contributors. All rights reserved. See [LICENSE](LICENSE).
+MIT. Copyright (c) 2026 HotPP contributors. See [LICENSE](LICENSE).
