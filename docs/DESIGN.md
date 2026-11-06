@@ -533,7 +533,7 @@ Defining `HOTPP_DISABLE` turns the whole API into inline no-ops.
 | **M5.3** | Attach to a running program that wasn't linked with the agent | — | dropped: programs link the agent or the single header, as with Live++ |
 | **M6** | AI agents: a control channel in every host (§3.4) and `hotpp mcp`, an MCP server (§14) | An MCP client launches a program, applies a two-file edit as one patch, gets a compile error with the compiler's output, restarts after a resize, attaches to a user's host, and its launched program dies with it (`mcp` case). | done (1.1) |
 
-Each milestone ends with a git commit, pushed to the Gitea remote, once its "done when" condition is met.
+Each milestone ends with a git commit, pushed, once its "done when" condition is met.
 
 **Known limits:**
 - Struct layout changes that live objects use are only warned about, never fixed up.

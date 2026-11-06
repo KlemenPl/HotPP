@@ -1,5 +1,6 @@
 # Builds HotPP and runs the full test suite: {GCC, Clang} x {Debug, Release}, plus
-# the host and unit tests under ASan/UBSan and under TSan.
+# the host and unit tests under ASan/UBSan and under TSan. Runs on GitHub Actions
+# and on Gitea Actions (which reads .github/workflows when there is no .gitea/).
 name: ci
 
 on:
@@ -28,6 +29,7 @@ jobs:
             sanitize: thread
     steps:
       - name: Install tools
+        # nodejs: Gitea's runner needs it in the container for actions/checkout.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates git nodejs \

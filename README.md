@@ -183,7 +183,7 @@ ctest --test-dir build --output-on-failure   # unit + end-to-end tests (gdb opti
 cmake -B build-asan -DHOTPP_SANITIZE=ON      # host and tests under ASan + UBSan (=thread: TSan)
 ```
 
-CI (`.gitea/workflows/ci.yml`) runs the suite with GCC and Clang, Debug and Release, and under ASan/UBSan and TSan.
+CI (`.github/workflows/ci.yml`) runs the suite with GCC and Clang, Debug and Release, and under ASan/UBSan and TSan.
 
 ```bash
 cmake --build build --target hotpp_single_header   # after changing the agent
