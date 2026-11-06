@@ -1,6 +1,6 @@
 # HotPP — Design
 
-Status: version 1.0.0 · M0, M1, M3, M4, M5.1, M5.2 and M6 (MCP) implemented; M2 (Windows) and M5.3 (attach) dropped · Last updated: 2026-11-06
+Status: version 1.1.0 · M0, M1, M3, M4, M5.1, M5.2 and M6 (MCP) implemented; M2 (Windows) and M5.3 (attach) dropped · Last updated: 2026-11-06
 
 HotPP is a hot-reload tool for C++ on Linux (x86-64, GCC and Clang). You edit a `.cpp` file or a header, save it, and the running program picks up the new code, typically within a fraction of a second. It doesn't restart and doesn't lose state.
 

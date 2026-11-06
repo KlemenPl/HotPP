@@ -9,7 +9,7 @@ HotPP works like Live++: it recompiles the changed files with your build's own c
 
 AI coding agents can drive it too: `hotpp mcp` is an [MCP](https://modelcontextprotocol.io) server that lets an agent launch your program, patch its edits in and read compile errors and output (see [AI agents](#ai-agents-mcp)).
 
-Version 1.0.0 ([changelog](CHANGELOG.md)). Requires Linux on x86-64 and GCC ≥ 11 or Clang ≥ 14. Building HotPP also needs CMake ≥ 3.25, and the tests need Python 3. How it works: [docs/DESIGN.md](docs/DESIGN.md).
+Version 1.1.0 ([changelog](CHANGELOG.md)). Requires Linux on x86-64 and GCC ≥ 11 or Clang ≥ 14. Building HotPP also needs CMake ≥ 3.25, and the tests need Python 3. How it works: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Build HotPP
 

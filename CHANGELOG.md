@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.1.0 — 2026-11-06
+
+AI coding agents can use HotPP: `hotpp mcp` is a Model Context Protocol server.
+
+### MCP server
+- `hotpp mcp` speaks MCP over stdio (protocol versions 2024-11-05 to 2025-11-25). Add it to Claude Code with `claude mcp add hotpp -- hotpp mcp --build "cmake --build build"`, or to any client that runs stdio servers.
+- Tools: `hotpp_launch`, `hotpp_reload`, `hotpp_restart`, `hotpp_status`, `hotpp_output`, `hotpp_logs`, `hotpp_set_auto_reload` and `hotpp_stop`.
+- `hotpp_reload` applies every changed file as one patch. It returns success, the compiler's output, or that a restart is needed, and says whether the program runs the sources on disk.
+- Programs an agent launches are patched only when it calls `hotpp_reload`, keep their output for it, and stop when the server exits, even if it is killed.
+- Programs you start yourself are found too; the agent can patch and restart them but not stop them. `--no-launch` limits it to those.
+- Progress notifications, cancellation, strict argument checking, and readable text plus structured results.
+
+### Host
+- Hosts accept controllers on their socket, next to agents (JSON over the same framing). The agent protocol is unchanged: programs built with 1.0 work with this host.
+- New options: `--no-auto-reload`, `--capture-output` (the program runs on a pseudo-terminal and its output is kept) and `--lifeline <fd>`.
+- Every patch attempt is recorded with its status, files, errors and compiler output.
+- A reload request also rescans tracked files' sizes and modification times, so changes inotify missed are found.
+- Programs started by the host get `SIGPIPE` back at its default, and the host no longer dies when its stdout closes.
+
+### Tested
+- Unit tests for the MCP layer (including thousands of mutated messages), the control channel, the event log and the JSON writer.
+- An end-to-end test drives `hotpp mcp` like an agent: launch, a two-file patch, a compile error and its fix, a restart, attaching to a user's host, and the server being killed. It runs in all six CI configurations, including ASan and TSan.
+
 ## 1.0.0 — 2026-11-05
 
 First release. Hot reload for C++ on Linux (x86-64, GCC ≥ 11 and Clang ≥ 14).
