@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.2.0 — 2026-11-09
+
+Windows: programs built with MSVC or clang-cl are hot reloaded like Linux ones.
+
+### Windows
+- The host, the agent, the single header and `hotpp mcp` build and run on Windows 10 and later (x86-64). Build with Ninja; `hotpp_enable()` sets the flags (`/Z7 /Gy /hotpatch`, `/DEBUG:FULL /FUNCTIONPADMIN /OPT:NOREF /OPT:NOICF /INCREMENTAL:NO`).
+- Patching reads COFF objects and the program's PDB. Functions are redirected, globals, statics, function-local statics and existing `thread_local`s keep their state, new globals are initialized, and exceptions pass between old and new code.
+- Restart-required checks and layout warnings work as on Linux. With MSVC, changing a variable's type also needs a restart, since its decorated name changes.
+- Hot restart rebuilds and continues the program as a new process (Windows has no `exec`); the host follows it. The running executable is moved aside for the build.
+- Hosts listen on named pipes for the user only. `hotpp mcp` launches programs in job objects and captures their output through a pseudo-console.
+- Not yet on Windows: patching DLLs, debugging patched code, restarting the host while programs run.
+
+### Everyone
+- `hotpp restart [--pid N]` rebuilds and restarts programs under a host; on Linux it's the same as `kill -USR1 <host pid>`.
+- `HOTPP_ENDPOINT_PREFIX` sets where hosts listen and `hotpp mcp` looks for them.
+- The agent protocol stays at version 8: programs and hosts of 1.x work together. Windows agents send a new `Restarting` message, which only Windows hosts receive.
+
+### Tests and CI
+- Windows builds can be tested from Linux: `cmake/toolchains/clang-cl-xwin.cmake` cross-compiles with clang-cl and the tests run under Wine. CI runs that (job `wine`), and MSVC and clang-cl on `windows-latest` (job `windows`, GitHub only).
+- Unit tests for COFF objects, PE images, PDBs, MSVC compile arguments, Windows command lines and `/sourceDependencies`.
+
 ## 1.1.2 — 2026-11-06
 
 - HotPP is under the MIT license (1.1.1 and earlier were proprietary). The single header carries the license text, since it is often copied into a project on its own.

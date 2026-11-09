@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 project(HotPP
-    VERSION 1.1.2
+    VERSION 1.2.0
     DESCRIPTION "Hot reload for C++ on Linux and Windows"
     LANGUAGES CXX)
 

@@ -1,8 +1,8 @@
 # HotPP — Design
 
-Status: version 1.1.2 · M0, M1, M3, M4, M5.1, M5.2 and M6 (MCP) implemented; M2 (Windows) and M5.3 (attach) dropped · Last updated: 2026-11-06
+Status: version 1.2.0 · M0–M4, M5.1, M5.2, M6 (MCP) and M2 (Windows) implemented; M5.3 (attach) dropped · Last updated: 2026-11-09
 
-HotPP is a hot-reload tool for C++ on Linux (x86-64, GCC and Clang). You edit a `.cpp` file or a header, save it, and the running program picks up the new code, typically within a fraction of a second. It doesn't restart and doesn't lose state.
+HotPP is a hot-reload tool for C++ on Linux (x86-64, GCC and Clang) and Windows (x86-64, MSVC and clang-cl; §15). You edit a `.cpp` file or a header, save it, and the running program picks up the new code, typically within a fraction of a second. It doesn't restart and doesn't lose state.
 
 It works the way Live++ does:
 1. It recompiles only the affected translation units with their original compiler commands.
@@ -22,7 +22,7 @@ Global and heap state stays where it is.
 - **Fail safe.** A compile error, an unsupported change or a host crash never corrupts or kills the target process. A patch either applies completely or not at all.
 
 ### Non-goals
-- Windows, macOS, ARM64, 32-bit x86. Windows (the former M2) was dropped on 2026-11-05.
+- macOS, ARM64, 32-bit x86, MinGW. (Windows, dropped on 2026-11-05, came back in 1.2: §15.)
 - LTO (`-flto`).
 - Changing the layout of a struct or class while instances of it exist. HotPP reports *restart required* where it can detect such a change, and warns where it can only suspect one (§7.6).
 - Attaching to a process that doesn't link `hotpp_agent` (M5.3, dropped). As with Live++, a program opts in by linking the agent or the single header.
@@ -34,13 +34,15 @@ Global and heap state stays where it is.
 
 | | |
 |---|---|
-| OS / CPU | Linux, x86-64 |
-| Compilers | GCC ≥ 11, Clang ≥ 14 (tested: GCC 14, Clang 19) |
-| Formats | ELF relocatable objects, ELF executables (PIE and non-PIE) |
-| Symbols / debug info | `.symtab` + DWARF 4/5 |
-| C++ runtime | libstdc++ with libgcc's unwinder |
+| | Linux | Windows (§15) |
+|---|---|---|
+| OS / CPU | Linux, x86-64 | Windows 10+, x86-64 |
+| Compilers | GCC ≥ 11, Clang ≥ 14 (tested: GCC 14, Clang 19) | MSVC (VS 2022), clang-cl |
+| Formats | ELF relocatable objects, ELF executables (PIE and non-PIE) | COFF objects (and /bigobj), PE executables |
+| Symbols / debug info | `.symtab` + DWARF 4/5 | PDB + CodeView in the objects |
+| C++ runtime | libstdc++ with libgcc's unwinder | the MSVC runtime (static or DLL), table-based unwinding |
 
-GCC and Clang share every code path. The differences are a few code patterns (padding NOP encodings, initializer function names), which the code handles explicitly.
+GCC and Clang share every code path. The differences are a few code patterns (padding NOP encodings, initializer function names), which the code handles explicitly. On Windows, the COFF loader translates objects into the same structures, so the patch linker is shared too (§15).
 
 ---
 
@@ -525,7 +527,7 @@ Defining `HOTPP_DISABLE` turns the whole API into inline no-ops.
 |---|---|---|---|
 | **M0** | Skeleton: CMake, `hotpp_enable`, agent and host, IPC handshake, region reservation, sample app | The host prints the module list and reserved region of the connected sample. | done |
 | **M1** | Live patching: compile DB, `.cpp` edits, ELF object loader, symbol index, binding policy, stubs and GOT, patch sites, sync-point mode | Editing a function body in the sample changes behaviour live while a global counter keeps counting. | done |
-| **M2** | Windows (MSVC, COFF/PDB) | — | dropped |
+| **M2** | Windows (MSVC, clang-cl, COFF/PDB; §15) | The e2e cases (except shared libraries, `dlopen`, host restarts and gdb), hot restart and `hotpp mcp` pass on Windows (clang-cl under Wine; MSVC on Windows CI). | done (1.2) |
 | **M3** | Correctness: header edits, several TUs per patch, repeated patches, initializers, local statics, existing TLS, exceptions and RTTI across patches, thread pausing, restart-required checks | The e2e suite (§12) passes with GCC and Clang at `-O0` and `-O2`. | done |
 | **M4** | Usability: gdb JIT debug info, hooks, async mode, layout-change warnings, quieter console output | You can step through patched code in gdb (automated test). | done |
 | **M5.1** | Shared libraries: every module built from the project's sources is patched, with its own index and region | A `.so`'s globals (including copy-relocated ones), statics and `thread_local`s survive a patch; it can call back into the program (`shared_lib` case). | done |
@@ -679,3 +681,56 @@ It then waits for `wait_program` and reports the result:
 `--no-launch` turns off launching, which leaves observing and patching programs the user started.
 
 **Not done:** the Streamable HTTP transport (local stdio covers coding agents), resources and prompts, sending input to a program.
+
+---
+
+## 15. Windows
+
+Windows uses the same host/agent split and the same patch linker. What differs:
+
+**Builds.** `hotpp_enable()` adds `/Z7 /Gy /hotpatch` and links with `/DEBUG:FULL /FUNCTIONPADMIN /OPT:NOREF /OPT:NOICF /INCREMENTAL:NO`:
+- `/FUNCTIONPADMIN` puts int3 padding before every function, which needs each function in its own section (`/Gy`)
+- `/hotpatch` makes every function start with an instruction of at least 2 bytes, so the entry's first 2 bytes can be replaced by the short jump
+
+The patch-site scheme is otherwise the Linux one (§8.3): a `jmp rel32` in the padding, then a 2-byte short jump at the entry.
+
+**Patch compiles** (`compile_db.cpp`): `/Fo`, `/Z7` (CodeView types in the object), `/Gy /Gw` (one section per function and variable) and `/hotpatch` are added. Dependencies come from `/sourceDependencies` (cl) or `/clang:-MMD` (clang-cl); `compile_commands.json` is split with Windows quoting rules; response files may be UTF-16.
+
+**Objects** (`object/coff_object.cpp`). COFF objects are translated into the ELF-shaped structures the linker reads:
+- section flags and kinds (`.CRT$XCU` is the initializer array, `.pdata` the unwind table, `.debug$*` isn't loaded)
+- COMDATs with their associative sections (unwind data) as groups
+- weak externals and `/alternatename` as aliases
+- `REL32_k` as `PC32` with addend A − 4 − k; `ADDR32NB` and `SECREL` as two new relocation types
+
+**Images** (`image/pe_image.cpp`, `image/codeview.cpp`). A PE image is read with its PDB:
+- publics give external symbols under their decorated names, which match the objects'
+- the module streams give the statics. PDBs name them undecorated (`over`, `` `anonymous namespace'::helper ``, `calls` nested in its function), and overloads share a name. So objects and PDBs both name statics by a **bridge key**: the CodeView name, the enclosing function and a structural fingerprint of the type. The object side gets it from its `.debug$S` records, which relocations tie to COFF symbols.
+- `LF_BUILDINFO` gives each compiland's source file (program membership), TPI the struct layouts
+- the image's identity is the CodeView `{GUID, age}` that the PDB repeats
+
+**Linking.** The patch region lies *above* the executable, within rel32 reach. Every RVA a patch contains — `.pdata`, `.xdata`, exception tables, jump tables, RTTI — is then relative to the executable's image base, which `RtlAddFunctionTable` gets too. Image-relative references resolve to new code (unwind data must describe it); MSVC vtables, RTTI and throw information bind to the program's copies. `__imp_X` gets a slot holding X's address when the program has no import of X. New functions get int3 padding, so later patches can redirect them. MSVC decorates a variable's name with its type, so a variable whose type changed shows up as a new name with an old prefix: restart required.
+
+**Exceptions.** `_CxxThrowException` finds the image of the throw information with `RtlPcToFileHeader`, which fails for patch memory. Patch code therefore throws through an agent function that passes the executable's base to `RaiseException` (the W0 spike, §13).
+
+**Agent.** Threads are paused with `SuspendThread`. A suspended thread may hold the heap lock, so nothing allocates while threads are suspended: the thread list comes from `NtQuerySystemInformation` into memory reserved up front. `FlushProcessWriteBuffers` serializes the cores.
+
+**IPC.** Named pipes (`\\.\pipe\hotpp-<user>…`) with a DACL for the user and remote clients rejected. Both ends check the other's user, since pipe names are global. Hosts also record their pipe in `%LOCALAPPDATA%\hotpp\endpoints`, because pipes can't be listed under Wine.
+
+**Hot restart.** There is no `exec`:
+1. The agent starts the rebuilt executable suspended and sends `Restarting{pid}`.
+2. It resumes the new process and ends itself.
+3. The host follows the new pid: in run mode, for controllers and for auto-reload settings. The new process takes over the pseudo-console and job.
+
+Windows locks a running executable, so the host renames it aside before the build.
+
+**Processes.** Children get explicit inherited-handle lists. Launched hosts run in a job object, so `hotpp mcp` can kill them with everything they started. Output is captured through a pseudo-console. `hotpp restart` replaces `kill -USR1`.
+
+**Testing without Windows.** `cmake/toolchains/clang-cl-xwin.cmake` cross-compiles with clang-cl against the MSVC runtime and SDK from xwin, and the tests run under Wine (CI job `wine`). Wine needs a few workarounds:
+- Wine's `msvcp140.dll` doesn't match the current STL headers (`condition_variable` never wakes), so the static runtime is used.
+- Wine neither redirects a native Linux program's standard handles nor reports its pid or exit status. The host runs a cross build's native compiler through `/bin/sh`, which writes its output and status to files.
+- Wine's pseudo-console doesn't capture output, so pipes are used under Wine.
+
+The `windows` CI job builds with real MSVC and clang-cl on GitHub.
+
+**Not yet:** patching DLLs, debugging patched code in Visual Studio (it would need a PDB per patch), and host restarts while programs run.
+
