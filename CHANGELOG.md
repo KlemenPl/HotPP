@@ -15,6 +15,7 @@ Windows: programs built with MSVC or clang-cl are hot reloaded like Linux ones.
 ### Everyone
 - `hotpp restart [--pid N]` rebuilds and restarts programs under a host; on Linux it's the same as `kill -USR1 <host pid>`.
 - `HOTPP_ENDPOINT_PREFIX` sets where hosts listen and `hotpp mcp` looks for them.
+- The CMake package accepts any 1.x request (`find_package(HotPP 1.1)` finds 1.2); it used to require the same minor version.
 - The agent protocol stays at version 8: programs and hosts of 1.x work together. Windows agents send a new `Restarting` message, which only Windows hosts receive.
 
 ### Tests and CI

@@ -145,7 +145,7 @@ install(EXPORT HotPPTargets NAMESPACE hotpp:: DESTINATION ${HOTPP_CMAKE_DIR})
 configure_package_config_file(cmake/HotPPConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/HotPPConfig.cmake
     INSTALL_DESTINATION ${HOTPP_CMAKE_DIR})
 write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/HotPPConfigVersion.cmake
-    COMPATIBILITY SameMinorVersion)
+    COMPATIBILITY SameMajorVersion)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/HotPPConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/HotPPConfigVersion.cmake
               cmake/HotPP.cmake
         DESTINATION ${HOTPP_CMAKE_DIR})
