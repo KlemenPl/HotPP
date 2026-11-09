@@ -7,9 +7,10 @@
 # for programs that use the single header (single_include/hotpp/hotpp.h) instead.
 #
 # Requirements this function cannot enforce for you:
-#   * use a generator that writes compile_commands.json (Ninja or Makefiles),
+#   * use a generator that writes compile_commands.json (Ninja or Makefiles; not
+#     a Visual Studio generator),
 #   * don't link with --gc-sections and don't strip the binary,
-#   * don't enable LTO / whole-program optimization anywhere in the target.
+#   * don't enable LTO / whole-program optimization (/GL, /LTCG) anywhere in the target.
 
 include_guard(GLOBAL)
 
@@ -40,7 +41,21 @@ function(hotpp_enable target)
         EXPORT_COMPILE_COMMANDS ON
         INTERPROCEDURAL_OPTIMIZATION OFF)
 
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        # MSVC and clang-cl (docs/DESIGN.md §4):
+        #   /Z7          debug info in the objects; the linker writes a full PDB
+        #   /hotpatch    every function starts with an instruction of 2+ bytes
+        #   /FUNCTIONPADMIN  padding before every function for the patch-site jump
+        #   /OPT:NOREF /OPT:NOICF  keep "unused" and identical functions separate
+        #   /INCREMENTAL:NO  no incremental-link thunks in front of functions
+        target_compile_options(${target} PRIVATE /Z7 /hotpatch)
+        if(type STREQUAL "EXECUTABLE" OR type MATCHES "SHARED_LIBRARY|MODULE_LIBRARY")
+            target_link_options(${target} PRIVATE /DEBUG:FULL /FUNCTIONPADMIN /OPT:NOREF /OPT:NOICF /INCREMENTAL:NO)
+        endif()
+        if(CMAKE_GENERATOR MATCHES "Visual Studio")
+            message(WARNING "hotpp_enable: Visual Studio generators write no compile_commands.json; use Ninja")
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         # 5 bytes of padding before every function entry and 2 at it, for the patch-site jump.
         target_compile_options(${target} PRIVATE -g -fpatchable-function-entry=7,5)
         if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

@@ -44,3 +44,51 @@ jobs:
         run: cmake --build build -j "$(nproc)"
       - name: Test
         run: ctest --test-dir build --output-on-failure -j "$(nproc)"
+
+  # Windows, cross-compiled with clang-cl against the MSVC runtime and SDK (unpacked
+  # by xwin, accepting Microsoft's license), tests run under Wine. Runs on both forges.
+  wine:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    steps:
+      - name: Install tools
+        # nodejs: Gitea's runner needs it in the container for actions/checkout.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git nodejs \
+            clang-19 lld-19 llvm-19 cmake make python3 wine wine64
+      - uses: actions/checkout@v4
+      - name: Fetch the MSVC runtime and Windows SDK
+        run: |
+          curl -fsSL https://github.com/Jake-Shadle/xwin/releases/download/0.10.0/xwin-0.10.0-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz -C /usr/local/bin --strip-components=1 xwin-0.10.0-x86_64-unknown-linux-musl/xwin
+          xwin --accept-license --arch x86_64 splat --output "$HOME/.xwin"
+      - name: Configure
+        run: cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/clang-cl-xwin.cmake -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build -j "$(nproc)"
+      - name: Test
+        run: |
+          WINEPREFIX="$PWD/build/wineprefix" WINEDEBUG=-all wineboot -i || true
+          ctest --test-dir build --output-on-failure
+
+  # Windows with the real toolchains: MSVC and clang-cl from Visual Studio. GitHub
+  # only; Gitea has no Windows runner.
+  windows:
+    if: github.server_url == 'https://github.com'
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [cl, clang-cl]
+        build: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} -DCMAKE_C_COMPILER=${{ matrix.compiler }}
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

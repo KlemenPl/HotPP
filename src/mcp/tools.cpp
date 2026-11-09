@@ -291,7 +291,11 @@ constexpr auto kSlack = 10s; // on top of a host-side timeout, for the reply to 
 std::string time_of_day(int64_t unix_ms) {
     const std::time_t t = std::time_t(unix_ms / 1000);
     std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
     localtime_r(&t, &tm);
+#endif
     char buf[32];
     std::snprintf(buf, sizeof buf, "%02d:%02d:%02d.%03d", tm.tm_hour, tm.tm_min, tm.tm_sec, int(unix_ms % 1000));
     return buf;

@@ -14,10 +14,12 @@ if(TARGET hotpp_host_lib)
         unit/deps_test.cpp
         unit/events_test.cpp
         unit/json_test.cpp
-        unit/mcp_test.cpp
         unit/patch_site_test.cpp
         unit/session_state_test.cpp)
     target_link_libraries(hotpp_unit_tests PRIVATE hotpp_mcp_lib hotpp_host_lib)
+endif()
+if(TARGET hotpp_host_lib AND NOT WIN32)
+    target_sources(hotpp_unit_tests PRIVATE unit/mcp_test.cpp)
 
     # The ELF tests link a real object file compiled the way patch compiles are.
     add_library(hotpp_test_link_sample OBJECT unit/data/link_sample.cpp)
@@ -44,7 +46,7 @@ endif()
 # End to end: each case under e2e/cases runs under the host while run_case.py
 # swaps in newer versions of its sources; see e2e/run_case.py.
 find_package(Python3 COMPONENTS Interpreter)
-if(TARGET hotpp AND Python3_Interpreter_FOUND)
+if(TARGET hotpp AND Python3_Interpreter_FOUND AND NOT WIN32)
     # SINGLE_HEADER: build the program with single_include/hotpp/hotpp.h instead of
     # linking hotpp_agent (the case provides hotpp_impl.cpp).
     # MCP: drive the program through hotpp mcp with mcp/run_mcp_test.py instead.
@@ -133,12 +135,13 @@ endif()
 
 # The single header must match the sources it's generated from.
 if(Python3_Interpreter_FOUND)
+    # A path, not the imported target: when cross-compiling, targets run under the emulator.
     add_test(NAME single_header_up_to_date
-        COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/tools/amalgamate.py --check)
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/amalgamate.py --check)
 endif()
 
 # Install into a temporary prefix and build a find_package(HotPP) project against it.
-if(Python3_Interpreter_FOUND AND TARGET hotpp)
+if(Python3_Interpreter_FOUND AND TARGET hotpp AND NOT CMAKE_CROSSCOMPILING)
     add_test(NAME install_and_consume
         COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/install/run_install_test.py
             --build-dir ${CMAKE_BINARY_DIR} --consumer ${CMAKE_CURRENT_SOURCE_DIR}/install/consumer

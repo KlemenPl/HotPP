@@ -40,6 +40,7 @@ std::string format_size(uint64_t bytes) {
 const char* platform_name(Platform p) {
     switch (p) {
     case Platform::Linux: return "linux";
+    case Platform::Windows: return "windows";
     default: return "unknown-os";
     }
 }
@@ -68,7 +69,7 @@ bool print_hello(const Hello& h, bool verbose) {
     }
     if (!verbose && ok) {
         add("[hotpp] agent connected: pid %u, %s (%s patch region)\n", unsigned(h.pid),
-            fs::path(h.exe).filename().c_str(), format_size(h.regions[0].size).c_str());
+            fs::path(h.exe).filename().string().c_str(), format_size(h.regions[0].size).c_str());
         std::fputs(out.c_str(), stdout);
         std::fflush(stdout);
         return ok;
@@ -344,7 +345,12 @@ Session::Outcome Session::run(const std::vector<uint8_t>& hello_payload) {
 }
 
 void Session::start_hot_reload() {
-    if (hello_.platform != Platform::Linux) throw std::runtime_error("only Linux processes can be patched");
+#ifdef _WIN32
+    if (hello_.platform != Platform::Windows) throw std::runtime_error("this host patches Windows programs only");
+    throw std::runtime_error("patching Windows programs is not implemented yet");
+#else
+    if (hello_.platform != Platform::Linux) throw std::runtime_error("this host patches Linux programs only");
+#endif
     if (hello_.arch != Arch::X64) throw std::runtime_error("only x86-64 is supported");
     if (hello_.compile_commands.empty())
         throw std::runtime_error("the app reported no compile_commands.json (use hotpp_enable() or set HOTPP_COMPILE_COMMANDS)");

@@ -1,16 +1,16 @@
 #include "host/session_state.h"
+#include "host/platform.h"
 #include "unit/test.h"
 
 #include <filesystem>
 #include <fstream>
 
-#include <unistd.h>
 
 using namespace hotpp;
 
 HOTPP_TEST(session_state_round_trips) {
     namespace fs = std::filesystem;
-    const fs::path file = fs::temp_directory_path() / ("hotpp-state-" + std::to_string(::getpid())) / "state";
+    const fs::path file = fs::temp_directory_path() / ("hotpp-state-" + std::to_string(hotpp::host::current_pid())) / "state";
     host::SessionState st;
     st.pid = 1234;
     st.next_patch = 7;

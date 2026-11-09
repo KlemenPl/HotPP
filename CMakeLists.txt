@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 project(HotPP
     VERSION 1.1.2
-    DESCRIPTION "Hot reload for C++ on Linux"
+    DESCRIPTION "Hot reload for C++ on Linux and Windows"
     LANGUAGES CXX)
 
 option(HOTPP_BUILD_HOST     "Build the hotpp host executable" ON)
@@ -13,8 +13,13 @@ if(PROJECT_IS_TOP_LEVEL)
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 endif()
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    message(FATAL_ERROR "HotPP supports Linux on x86-64 only (got ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR})")
+if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Linux|Windows)$" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    message(FATAL_ERROR "HotPP supports Linux and Windows on x86-64 (got ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR})")
+endif()
+if(WIN32)
+    set(HOTPP_OS win)
+else()
+    set(HOTPP_OS linux)
 endif()
 
 find_package(Threads REQUIRED)
@@ -22,18 +27,29 @@ include(cmake/HotPP.cmake)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(HOTPP_WARNINGS -Wall -Wextra)
+if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set(HOTPP_WARNINGS /W4)
+else()
+    set(HOTPP_WARNINGS -Wall -Wextra)
+endif()
 
 # --- agent: static library linked into the target application ---------------
 add_library(hotpp_agent STATIC
     src/agent/agent.cpp
-    src/agent/jit_debug.cpp
     src/agent/patcher.cpp
-    src/agent/platform_linux.cpp
+    src/agent/platform_${HOTPP_OS}.cpp
     src/agent/region_select.cpp
-    src/agent/threads_linux.cpp)
+    src/agent/threads_${HOTPP_OS}.cpp)
+if(NOT WIN32)
+    target_sources(hotpp_agent PRIVATE src/agent/jit_debug.cpp) # gdb's JIT interface
+endif()
 add_library(hotpp::agent ALIAS hotpp_agent)
-target_link_libraries(hotpp_agent PRIVATE ${CMAKE_DL_LIBS})
+if(WIN32)
+    target_link_libraries(hotpp_agent PRIVATE psapi)
+    target_compile_definitions(hotpp_agent PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+    target_link_libraries(hotpp_agent PRIVATE ${CMAKE_DL_LIBS})
+endif()
 
 target_include_directories(hotpp_agent
     PUBLIC  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -64,14 +80,18 @@ if(HOTPP_BUILD_HOST)
         src/host/link/patch_site.cpp
         src/host/link/symbol_index.cpp
         src/host/object/elf_object.cpp
-        src/host/platform_linux.cpp
+        src/host/platform_${HOTPP_OS}.cpp
         src/host/util/json.cpp
-        src/host/watcher_linux.cpp)
+        src/host/watcher_${HOTPP_OS}.cpp)
     target_include_directories(hotpp_host_lib PUBLIC ${PROJECT_SOURCE_DIR}/src)
     target_compile_features(hotpp_host_lib PUBLIC cxx_std_20)
     target_compile_definitions(hotpp_host_lib PUBLIC HOTPP_VERSION="${PROJECT_VERSION}")
     target_compile_options(hotpp_host_lib PRIVATE ${HOTPP_WARNINGS})
     target_link_libraries(hotpp_host_lib PUBLIC Threads::Threads)
+    if(WIN32)
+        target_link_libraries(hotpp_host_lib PUBLIC dbghelp advapi32)
+        target_compile_definitions(hotpp_host_lib PUBLIC _CRT_SECURE_NO_WARNINGS)
+    endif()
 
     # The host parses arbitrary object files and debug info and runs several threads;
     # sanitize it (and everything linking it). Programs under test stay unsanitized.

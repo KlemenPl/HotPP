@@ -1,11 +1,11 @@
 #include "host/compile_db.h"
+#include "host/platform.h"
 #include "unit/test.h"
 
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
 
-#include <unistd.h>
 
 using namespace hotpp;
 
@@ -63,13 +63,13 @@ HOTPP_TEST(patch_arguments_redirect_output_and_drop_depfiles) {
 
 HOTPP_TEST(response_files_are_expanded) {
     namespace fs = std::filesystem;
-    const fs::path dir = fs::temp_directory_path() / ("hotpp-rsp-" + std::to_string(::getpid()));
+    const fs::path dir = fs::temp_directory_path() / ("hotpp-rsp-" + std::to_string(hotpp::host::current_pid()));
     fs::create_directories(dir / "sub");
     {
         std::ofstream(dir / "args.rsp") << "-O2 \"-DNAME=a b\" @sub/more.rsp -o x.o";
         std::ofstream(dir / "sub/more.rsp") << "-MD -MF x.o.d";
     }
-    const CompileDb db = CompileDb::parse(R"([{"directory": ")" + dir.string() +
+    const CompileDb db = CompileDb::parse(R"([{"directory": ")" + dir.generic_string() +
                                               R"(", "file": "x.cpp", "command": "c++ @args.rsp -c x.cpp"}])",
                                           dir / "compile_commands.json");
     const auto& a = db.entries().at(0).arguments;
@@ -138,7 +138,7 @@ HOTPP_TEST(msvc_patch_arguments) {
 
 HOTPP_TEST(utf16_response_files_are_read) {
     namespace fs = std::filesystem;
-    const fs::path dir = fs::temp_directory_path() / ("hotpp-rsp16-" + std::to_string(::getpid()));
+    const fs::path dir = fs::temp_directory_path() / ("hotpp-rsp16-" + std::to_string(hotpp::host::current_pid()));
     fs::create_directories(dir);
     {
         std::ofstream f(dir / "args.rsp", std::ios::binary);
@@ -150,7 +150,7 @@ HOTPP_TEST(utf16_response_files_are_read) {
             f.put(0);
         }
     }
-    const CompileDb db = CompileDb::parse(R"([{"directory": ")" + dir.string() +
+    const CompileDb db = CompileDb::parse(R"([{"directory": ")" + dir.generic_string() +
                                               R"(", "file": "x.cpp", "arguments": ["c++", "@args.rsp", "-c", "x.cpp"]}])",
                                           dir / "compile_commands.json");
     const auto& a = db.entries().at(0).arguments;
