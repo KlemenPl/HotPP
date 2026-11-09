@@ -43,7 +43,7 @@ jobs:
       - name: Build
         run: cmake --build build -j "$(nproc)"
       - name: Test
-        run: ctest --test-dir build --output-on-failure -j "$(nproc)"
+        run: ctest --test-dir build --output-on-failure -j "$(nproc)" --output-junit junit.xml || { python3 tools/ci_report.py build/junit.xml; exit 1; }
 
   # Windows, cross-compiled with clang-cl against the MSVC runtime and SDK (unpacked
   # by xwin, accepting Microsoft's license), tests run under Wine. Runs on both forges.
@@ -71,7 +71,7 @@ jobs:
       - name: Test
         run: |
           WINEPREFIX="$PWD/build/wineprefix" WINEDEBUG=-all wineboot -i || true
-          ctest --test-dir build --output-on-failure
+          ctest --test-dir build --output-on-failure --output-junit junit.xml || { python3 tools/ci_report.py build/junit.xml; exit 1; }
 
   # Windows with the real toolchains: MSVC and clang-cl from Visual Studio. GitHub
   # only; Gitea has no Windows runner.
@@ -91,4 +91,5 @@ jobs:
       - name: Build
         run: cmake --build build
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        shell: bash
+        run: ctest --test-dir build --output-on-failure --output-junit junit.xml || { python tools/ci_report.py build/junit.xml; exit 1; }
