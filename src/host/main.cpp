@@ -14,10 +14,8 @@
 #include "mcp/mcp.h"
 
 #include <atomic>
-#include <cerrno>
 #include <chrono>
 #include <condition_variable>
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,11 +24,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/eventfd.h>
-#include <unistd.h>
 
 namespace {
 
@@ -49,24 +42,22 @@ constexpr const char* kUsage =
     "\n"
     "options:\n"
     "  --endpoint <path>   socket to listen on\n"
-    "  --build <command>   rebuild command for hot restarts (run with /bin/sh -c)\n"
+    "  --build <command>   rebuild command for hot restarts (run with the shell)\n"
     "  --auto-restart      rebuild and restart when a change can't be patched\n"
     "  --no-auto-reload    don't patch saved files until a controller asks (hotpp mcp)\n"
     "  --capture-output    run the program on a pseudo-terminal and keep its output\n"
     "                      for controllers (it is still printed)\n"
-    "  --lifeline <fd>     stop the program and exit once <fd> reads end of file\n"
+    "  --lifeline <handle> stop the program and exit once <handle> reads end of file\n"
     "                      (used by hotpp mcp)\n"
     "  -v, --verbose       full connect info and every binding decision\n"
-    "  --version           print the version and exit\n"
-    "\n"
-    "kill -USR1 <host pid> rebuilds and restarts every connected program.\n";
+    "  --version           print the version and exit\n";
 
 struct Options {
     std::string endpoint;
     bool once = false;
     bool version = false;
     bool capture_output = false;
-    int lifeline = -1;
+    host::Handle lifeline = host::kNoHandle;
     host::HostOptions host;
     std::vector<std::string> program;
 };
@@ -95,10 +86,8 @@ bool parse_args(int argc, char** argv, Options& o) {
         } else if (std::strcmp(a, "--capture-output") == 0) {
             o.capture_output = true;
         } else if (std::strcmp(a, "--lifeline") == 0 && i + 1 < argc) {
-            char* end = nullptr;
-            const long fd = std::strtol(argv[++i], &end, 10);
-            if (!end || *end || fd < 3 || fd > 1 << 20) return false;
-            o.lifeline = int(fd);
+            o.lifeline = host::parse_handle(argv[++i]);
+            if (o.lifeline == host::kNoHandle) return false;
         } else {
             return false;
         }
@@ -106,28 +95,18 @@ bool parse_args(int argc, char** argv, Options& o) {
     return true;
 }
 
-// Set by SIGINT/SIGTERM: shut down cleanly (remove the socket, end sessions).
-std::atomic<int> g_stop_signal{0};
+// Set by Ctrl+C / SIGTERM: shut down cleanly (remove the endpoint, end sessions).
+std::atomic<bool> g_stop{false};
+std::atomic<bool> g_terminate{false}; // a Terminate request (not Ctrl+C): pass it on to the program
 std::atomic<int> g_interrupts{0};
 
-void on_stop_signal(int sig) {
-    g_stop_signal = sig;
-    if (sig == SIGINT) g_interrupts.fetch_add(1);
+void on_stop(host::StopRequest r) {
+    if (r == host::StopRequest::Interrupt) g_interrupts.fetch_add(1);
+    else g_terminate = true;
+    g_stop = true;
 }
 
-void install_signal_handlers() {
-    struct sigaction sa{};
-    sigemptyset(&sa.sa_mask);
-    sa.sa_handler = on_stop_signal; // no SA_RESTART: interrupt waitpid() so signals can be forwarded
-    sigaction(SIGINT, &sa, nullptr);
-    sigaction(SIGTERM, &sa, nullptr);
-    sa.sa_handler = [](int) { host::g_restart_requests.fetch_add(1); };
-    sa.sa_flags = SA_RESTART;
-    sigaction(SIGUSR1, &sa, nullptr);
-    // A closed stdout (hotpp mcp gone, `| head`) must not kill the host; children
-    // get SIGPIPE back at its default (spawn_process).
-    signal(SIGPIPE, SIG_IGN);
-}
+void on_restart() { host::g_restart_requests.fetch_add(1); }
 
 constexpr uint32_t kMaxHello = 64u << 20;
 
@@ -145,8 +124,8 @@ struct Server {
 void serve_controller_connection(host::Stream& stream, const proto::Header& h, Server* server) {
     json::Value hello;
     if (host::recv_json_payload(stream, h, hello, host::kMaxControlRequest) != host::RecvStatus::Ok) return;
-    if (stream.peer_uid() != int64_t(::getuid())) {
-        std::fprintf(stderr, "[hotpp] refused a controller of another user (uid %lld)\n", (long long)stream.peer_uid());
+    if (!stream.peer_is_same_user()) {
+        std::fprintf(stderr, "[hotpp] refused a controller of another user (%s)\n", stream.peer_description().c_str());
         return;
     }
     if (server->ctx.controllers.fetch_add(1) >= host::kMaxControllers) {
@@ -225,12 +204,6 @@ void shut_down(host::Listener& listener, std::thread& acceptor, Server& server) 
     for (std::thread& t : server.threads) t.join();
 }
 
-void wake(int fd) {
-    const uint64_t one = 1;
-    ssize_t n = ::write(fd, &one, sizeof one);
-    (void)n;
-}
-
 } // namespace
 
 int main(int argc, char** argv) {
@@ -273,7 +246,7 @@ int main(int argc, char** argv) {
     ctx.options = opt.host;
     ctx.endpoint = endpoint;
     ctx.run_mode = run_mode;
-    ctx.lifeline = opt.lifeline >= 0;
+    ctx.lifeline = opt.lifeline != host::kNoHandle;
     if (opt.capture_output) ctx.output = std::make_unique<host::OutputBuffer>();
     {
         std::lock_guard<std::mutex> lock(ctx.child.mutex);
@@ -287,41 +260,40 @@ int main(int argc, char** argv) {
         {
             std::lock_guard<std::mutex> lock(ctx.child.mutex);
             if (!ctx.child.running) return;
-            ::kill(ctx.child.pid, SIGTERM); // not reaped yet (running), so the pid is still the program's
+            host::stop_process(ctx.child.pid, false); // not reaped yet (running), so the pid is still the program's
         }
         std::lock_guard<std::mutex> lock(killer_mutex);
         if (killer.joinable()) return;
         killer = std::thread([&ctx, grace] {
             std::unique_lock<std::mutex> lock(ctx.child.mutex);
-            if (!ctx.child.cv.wait_for(lock, grace, [&] { return !ctx.child.running; })) ::kill(ctx.child.pid, SIGKILL);
+            if (!ctx.child.cv.wait_for(lock, grace, [&] { return !ctx.child.running; }))
+                host::stop_process(ctx.child.pid, true);
         });
     };
 
-    install_signal_handlers();
+    host::install_signal_handlers(on_stop, on_restart);
     std::printf("[hotpp] host %s listening on %s\n", HOTPP_VERSION, endpoint.c_str());
     std::fflush(stdout);
 
     // Wakes the lifeline and output threads at shutdown.
-    const int wake_fd = ::eventfd(0, EFD_CLOEXEC);
+    host::WakeEvent wake;
     std::atomic<bool> lifeline_lost{false};
     std::thread lifeline;
-    if (opt.lifeline >= 0) {
-        ::fcntl(opt.lifeline, F_SETFD, FD_CLOEXEC); // not for the program
+    if (opt.lifeline != host::kNoHandle) {
+        host::keep_private(opt.lifeline); // not for the program
         lifeline = std::thread([&] {
-            pollfd p[2] = {{opt.lifeline, POLLIN, 0}, {wake_fd, POLLIN, 0}};
             for (;;) {
-                const int rc = ::poll(p, 2, -1);
-                if (rc < 0 && errno == EINTR) continue;
-                if (rc < 0 || (p[1].revents & POLLIN)) return; // shutting down
                 char c;
-                const ssize_t n = ::read(opt.lifeline, &c, 1);
-                if (n > 0 || (n < 0 && (errno == EINTR || errno == EAGAIN))) continue;
-                break; // end of file: whoever held the other end is gone
+                const long n = host::read_some(opt.lifeline, &c, 1, -1, &wake);
+                if (n > 0) continue;
+                if (n == -2) return; // shutting down
+                break;               // end of file (or an error): whoever held the other end is gone
             }
             std::printf("[hotpp] the controller that started this host is gone; stopping\n");
             std::fflush(stdout);
             lifeline_lost = true;
-            g_stop_signal = SIGTERM;
+            g_terminate = true;
+            g_stop = true;
             if (ctx.stop_child) ctx.stop_child(std::chrono::seconds(5));
             {
                 std::lock_guard<std::mutex> lock(ctx.child.mutex);
@@ -339,14 +311,14 @@ int main(int argc, char** argv) {
     });
 
     auto join_helpers = [&] {
-        wake(wake_fd);
+        wake.set();
         if (lifeline.joinable()) lifeline.join();
         std::lock_guard<std::mutex> lock(killer_mutex);
         if (killer.joinable()) killer.join();
     };
 
     if (run_mode) {
-        int master = -1;
+        host::Handle master = host::kNoHandle;
         const int pid = opt.capture_output ? host::spawn_child_pty(opt.program, master, error)
                                            : host::spawn_child(opt.program, error);
         if (pid < 0) {
@@ -363,36 +335,32 @@ int main(int argc, char** argv) {
         if (lifeline_lost) ctx.stop_child(std::chrono::seconds(5));
         // The program's output: kept for controllers and printed.
         std::thread output;
-        if (master >= 0)
+        if (master != host::kNoHandle)
             output = std::thread([&, master] {
                 char buf[8192];
-                pollfd p[2] = {{master, POLLIN, 0}, {wake_fd, POLLIN, 0}};
                 bool stopping = false;
                 for (;;) {
-                    const int rc = ::poll(p, 2, stopping ? 0 : -1);
-                    if (rc < 0 && errno == EINTR) continue;
-                    if (rc <= 0) break; // nothing more to read while stopping
-                    if (p[1].revents & POLLIN) stopping = true; // read what's left, then stop
-                    if (!(p[0].revents & (POLLIN | POLLHUP | POLLERR))) {
+                    // Once shutting down, read only what is already there.
+                    const long n = host::read_some(master, buf, sizeof buf, stopping ? 0 : -1, stopping ? nullptr : &wake);
+                    if (n == -2) {
                         if (stopping) break;
+                        stopping = true;
                         continue;
                     }
-                    const ssize_t n = ::read(master, buf, sizeof buf);
-                    if (n < 0 && errno == EINTR) continue;
-                    if (n <= 0) break; // EIO: every writer is gone
+                    if (n <= 0) break; // every writer is gone
                     ctx.output->append(std::string_view(buf, size_t(n)));
                     std::fwrite(buf, 1, size_t(n), stdout);
                     std::fflush(stdout);
                 }
                 ctx.output->close();
-                ::close(master);
+                host::close_handle(master);
             });
 
-        // Ctrl+C reaches the child too (same process group); SIGTERM sent to the host
-        // alone, or a second Ctrl+C, is passed on.
+        // Ctrl+C reaches the child too (same process group); a stop request sent to
+        // the host alone, or a second Ctrl+C, is passed on.
         const int code = host::wait_child(pid, [pid] {
-            if (g_stop_signal == SIGTERM) kill(pid, SIGTERM);
-            if (g_interrupts >= 2) kill(pid, SIGKILL);
+            if (g_terminate) host::stop_process(pid, false);
+            if (g_interrupts >= 2) host::stop_process(pid, true);
         });
         {
             std::lock_guard<std::mutex> lock(ctx.child.mutex);
@@ -415,7 +383,7 @@ int main(int argc, char** argv) {
             ctx.child.cv.wait(lock, [&] { return ctx.child.dismissed || lifeline_lost.load(); });
         }
         shut_down(*listener, acceptor, server);
-        wake(wake_fd);
+        wake.set();
         if (output.joinable()) output.join();
         join_helpers();
         if (code != 0) return code;
@@ -428,10 +396,10 @@ int main(int argc, char** argv) {
 
     {
         std::unique_lock<std::mutex> lock(server.mutex);
-        while (!g_stop_signal && !(opt.once && server.sessions_ended > 0))
+        while (!g_stop && !(opt.once && server.sessions_ended > 0))
             server.cv.wait_for(lock, std::chrono::milliseconds(200));
     }
-    if (g_stop_signal) std::printf("[hotpp] shutting down\n");
+    if (g_stop) std::printf("[hotpp] shutting down\n");
     shut_down(*listener, acceptor, server);
     join_helpers();
     return server.problems ? 3 : 0;

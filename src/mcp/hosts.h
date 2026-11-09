@@ -82,7 +82,7 @@ struct Launched {
     int host_pid = -1;
     std::vector<std::string> command;
     std::string cwd;
-    int lifeline = -1; // write end (under `mutex`); closing it stops the host and its program
+    intptr_t lifeline = -1; // write end (host::Handle, under `mutex`); closing it stops the host and its program
 
     std::string host_output() const; // the last 64 KiB the host printed
     bool exited() const;

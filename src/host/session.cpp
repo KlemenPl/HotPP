@@ -14,11 +14,6 @@
 #include <functional>
 #include <sstream>
 
-#include <csignal>
-
-#include <cxxabi.h>
-#include <unistd.h>
-
 namespace hotpp::host {
 
 std::atomic<int> g_restart_requests{0};
@@ -120,11 +115,8 @@ bool is_header(const fs::path& p) {
     return kExt.count(p.extension().string()) != 0;
 }
 
-std::string demangle(const std::string& name) {
-    int status = 0;
-    char* d = abi::__cxa_demangle(name.c_str(), nullptr, nullptr, &status);
-    std::string out = status == 0 && d ? d : name;
-    std::free(d);
+std::string function_name(const std::string& name) {
+    std::string out = host::demangle(name);
     if (out.find('(') == std::string::npos) out += "()";
     return out;
 }
@@ -157,7 +149,7 @@ Session::~Session() {
         // While the process lives, keep the state file so a new host can resume
         // (docs/DESIGN.md §3.3); the compiled objects can go.
         std::error_code ec;
-        const bool alive = hello_.pid && (::kill(pid_t(hello_.pid), 0) == 0 || errno == EPERM);
+        const bool alive = process_alive(hello_.pid);
         if (!alive) {
             fs::remove_all(patch_dir_, ec);
         } else {
@@ -171,7 +163,7 @@ void Session::say(const std::string& line, const char* kind) const {
     if (kind) events_.add(hello_.pid, kind, line);
     // Colors only on a terminal (and not with NO_COLOR): green for applied patches,
     // red for patches not applied, yellow for warnings and notes.
-    static const bool color = isatty(STDOUT_FILENO) && !std::getenv("NO_COLOR");
+    static const bool color = stdout_is_terminal() && !std::getenv("NO_COLOR");
     const char* c = nullptr;
     if (color) {
         if (line.rfind("warning:", 0) == 0 || line.rfind("note:", 0) == 0) c = "\033[33m";
@@ -458,7 +450,7 @@ void Session::setup_modules() {
         program.push_back(&c);
     }
     std::string error;
-    watcher_ = watch_directories({watched_dirs_.begin(), watched_dirs_.end()}, error, handle_->wake_fd());
+    watcher_ = watch_directories({watched_dirs_.begin(), watched_dirs_.end()}, error, &handle_->wake_event());
     if (!watcher_) throw std::runtime_error(error);
 
     std::string names;
@@ -944,7 +936,7 @@ std::shared_ptr<PatchReport> Session::handle_changes(const std::vector<fs::path>
     for (size_t i = 0; i < tus.size(); ++i) {
         jobs[i].cmd = tus[i];
         const std::string stem = std::to_string(i) + "-" + tus[i]->file.stem().string();
-        jobs[i].out = dir / (stem + ".o");
+        jobs[i].out = dir / (stem + (msvc_style(driver_of(*tus[i])) ? ".obj" : ".o"));
         jobs[i].depfile = dir / (stem + ".d");
         names += (names.empty() ? "" : ", ") + tus[i]->file.filename().string();
     }
@@ -957,9 +949,8 @@ std::shared_ptr<PatchReport> Session::handle_changes(const std::vector<fs::path>
             workers.emplace_back([&] {
                 for (size_t i; (i = next.fetch_add(1)) < jobs.size();) {
                     Job& j = jobs[i];
-                    std::vector<std::string> args = patch_compile_arguments(*j.cmd, j.out);
-                    args.insert(args.end(), {"-MMD", "-MF", j.depfile.string()});
-                    j.rc = run_capture(args, j.cmd->directory, j.output, j.error);
+                    j.rc = run_capture(patch_compile_arguments(*j.cmd, j.out, j.depfile), j.cmd->directory, j.output,
+                                       j.error);
                 }
             });
         for (std::thread& w : workers) w.join();
@@ -981,7 +972,7 @@ std::shared_ptr<PatchReport> Session::handle_changes(const std::vector<fs::path>
             continue;
         }
         // Keep the include graph current: the edit may have added or removed includes.
-        graph_.set(j.cmd->file, parse_depfile(read_file(j.depfile), j.cmd->directory));
+        graph_.set(j.cmd->file, read_dependencies(*j.cmd, j.depfile));
         if (failure) continue;
         try {
             objects.push_back(object::ElfObject::load(j.out));
@@ -1038,7 +1029,7 @@ std::shared_ptr<PatchReport> Session::handle_changes(const std::vector<fs::path>
                 if (!r.output.empty()) report->compiler_output += (report->compiler_output.empty() ? "" : "\n") + r.output;
             }
         } else if (!options_.build_command.empty()) {
-            say("run with --auto-restart, or send the host SIGUSR1, to rebuild and restart the program");
+            say(std::string("run with --auto-restart, or ") + restart_request_hint() + ", to rebuild and restart the program");
         }
         report->duration_ms = ms_between(started, Clock::now());
         publish(report);
@@ -1107,7 +1098,7 @@ std::shared_ptr<PatchReport> Session::handle_changes(const std::vector<fs::path>
                 const uint64_t lo = rec.base + sym.value, hi = lo + sym.size;
                 const bool replaced = std::any_of(l.result.patch.sites.begin(), l.result.patch.sites.end(),
                                                   [&](const PatchSite& s) { return s.entry_addr >= lo && s.entry_addr < hi; });
-                const std::string name = demangle(sym.name);
+                const std::string name = function_name(sym.name);
                 if (replaced && std::find(running.begin(), running.end(), name) == running.end()) running.push_back(name);
                 break;
             }
@@ -1155,7 +1146,7 @@ Session::RestartResult Session::hot_restart(const std::string& reason, bool rebu
         say("rebuilding (" + reason + "): " + options_.build_command);
         const auto started = Clock::now();
         std::string output, error;
-        const int rc = run_capture({"/bin/sh", "-c", options_.build_command}, {}, output, error);
+        const int rc = run_capture(shell_command(options_.build_command), {}, output, error);
         r.output = cap_output(strip_ansi(output), kOutputHead, kOutputTail);
         if (rc != 0) {
             std::fputs(output.c_str(), stdout);

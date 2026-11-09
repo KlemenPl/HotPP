@@ -81,3 +81,80 @@ HOTPP_TEST(response_files_are_expanded) {
     CHECK(!has(patched, "-MD"));
     fs::remove_all(dir);
 }
+
+HOTPP_TEST(split_command_line_windows_rules) {
+    const auto a = split_command_line(R"(C:\VS\cl.exe /nologo "/DNAME=a b" /DQ=\"x\" "C:\dir with space\\" /Fo"out dir\x.obj" C:\src\x.cpp)",
+                                      true);
+    CHECK(a.size() == 7);
+    CHECK(a.size() == 7 && a[0] == R"(C:\VS\cl.exe)");
+    CHECK(a.size() == 7 && a[2] == "/DNAME=a b");
+    CHECK(a.size() == 7 && a[3] == "/DQ=\"x\"");
+    CHECK(a.size() == 7 && a[4] == R"(C:\dir with space\)"); // 2n backslashes before a quote: n of them
+    CHECK(a.size() == 7 && a[5] == R"(/Foout dir\x.obj)");
+    CHECK(a.size() == 7 && a[6] == R"(C:\src\x.cpp)");
+}
+
+HOTPP_TEST(driver_is_detected) {
+    CompileCommand cmd;
+    cmd.arguments = {"/usr/bin/c++", "-c", "x.cpp"};
+    CHECK(driver_of(cmd) == Driver::Gnu);
+    cmd.arguments = {"C:\\VS\\bin\\CL.EXE", "/c", "x.cpp"};
+    CHECK(driver_of(cmd) == Driver::Cl);
+    cmd.arguments = {"/usr/lib/llvm-19/bin/clang-cl", "/c", "x.cpp"};
+    CHECK(driver_of(cmd) == Driver::ClangCl);
+    cmd.arguments = {"clang++", "--driver-mode=cl", "/c", "x.cpp"};
+    CHECK(driver_of(cmd) == Driver::ClangCl);
+}
+
+HOTPP_TEST(msvc_patch_arguments) {
+    CompileCommand cmd;
+    cmd.arguments = {"cl.exe", "/nologo", "/Zi", "/FdC:\\b\\x.pdb", "/FoC:\\b\\x.obj", "/showIncludes", "/O2",
+                     "/sourceDependencies", "C:\\b\\x.json", "/c", "C:\\s\\x.cpp"};
+    const auto out = patch_compile_arguments(cmd, "C:\\p\\x.obj", "C:\\p\\x.json");
+    CHECK(!has(out, "/Zi"));
+    CHECK(!has(out, "/FdC:\\b\\x.pdb"));
+    CHECK(!has(out, "/FoC:\\b\\x.obj"));
+    CHECK(!has(out, "/showIncludes"));
+    CHECK(!has(out, "C:\\b\\x.json"));
+    CHECK(has(out, "/O2"));
+    CHECK(has(out, "/c"));
+    CHECK(has(out, "/Z7"));
+    CHECK(has(out, "/Gy"));
+    CHECK(has(out, "/Gw"));
+    CHECK(has(out, "/FoC:\\p\\x.obj"));
+    CHECK(has(out, "/sourceDependencies"));
+    CHECK(has(out, "C:\\p\\x.json"));
+
+    // clang-cl: options stay before `--`, dependencies through /clang:.
+    cmd.arguments = {"clang-cl", "/nologo", "-Fox.obj", "/Z7", "/c", "--", "/home/s/x.cpp"};
+    const auto c = patch_compile_arguments(cmd, "/p/x.obj", "/p/x.d");
+    CHECK(!has(c, "-Fox.obj"));
+    CHECK(has(c, "/clang:-MMD"));
+    CHECK(has(c, "/clang:-MF/p/x.d"));
+    CHECK(c.back() == "/home/s/x.cpp");
+    CHECK(c.size() >= 2 && c[c.size() - 2] == "--");
+    CHECK(std::count(c.begin(), c.end(), "/Z7") == 1);
+}
+
+HOTPP_TEST(utf16_response_files_are_read) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("hotpp-rsp16-" + std::to_string(::getpid()));
+    fs::create_directories(dir);
+    {
+        std::ofstream f(dir / "args.rsp", std::ios::binary);
+        const std::string text = "-O2 -DX=1";
+        f.put(char(0xFF));
+        f.put(char(0xFE));
+        for (char ch : text) {
+            f.put(ch);
+            f.put(0);
+        }
+    }
+    const CompileDb db = CompileDb::parse(R"([{"directory": ")" + dir.string() +
+                                              R"(", "file": "x.cpp", "arguments": ["c++", "@args.rsp", "-c", "x.cpp"]}])",
+                                          dir / "compile_commands.json");
+    const auto& a = db.entries().at(0).arguments;
+    CHECK(has(a, "-O2"));
+    CHECK(has(a, "-DX=1"));
+    fs::remove_all(dir);
+}

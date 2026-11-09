@@ -735,31 +735,57 @@ inline bool decode(Reader& r, ResolveReply& m) {
 } // namespace hotpp::proto
 
 // ---- src/common/endpoint.h ---------------------------------------------------
-// Default host endpoints. The host listens, agents connect.
+// Default host endpoints. The host listens, agents connect. On Linux an endpoint is
+// a Unix socket path; on Windows, a named pipe.
 
 #include <cstdint>
 #include <cstdlib>
 #include <string>
 
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 namespace hotpp {
 
-// $XDG_RUNTIME_DIR is per-user and private; /tmp is the fallback, with the uid in the name.
+#ifdef _WIN32
+inline constexpr const char* kEndpointSuffix = "";
+#else
+inline constexpr const char* kEndpointSuffix = ".sock";
+#endif
+
+// Every endpoint of this user starts with this. $HOTPP_ENDPOINT_PREFIX overrides it
+// (tests use a private one).
+// - Linux: $XDG_RUNTIME_DIR is per-user and private; /tmp is the fallback, with the
+//   uid in the name.
+// - Windows: pipe names are global, so the user name is part of it; the pipes
+//   themselves only admit this user.
 inline std::string endpoint_prefix() {
+    const char* custom = std::getenv("HOTPP_ENDPOINT_PREFIX");
+    if (custom && *custom) return custom;
+#ifdef _WIN32
+    const char* user = std::getenv("USERNAME");
+    return std::string("\\\\.\\pipe\\hotpp-") + (user && *user ? user : "user");
+#else
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
     if (xdg && *xdg) return std::string(xdg) + "/hotpp";
     return "/tmp/hotpp-" + std::to_string(getuid());
+#endif
 }
-inline std::string default_endpoint() { return endpoint_prefix() + ".sock"; }
+inline std::string default_endpoint() { return endpoint_prefix() + kEndpointSuffix; }
 inline std::string unique_endpoint(uint32_t host_pid) {
-    return endpoint_prefix() + "-" + std::to_string(host_pid) + ".sock";
+    return endpoint_prefix() + "-" + std::to_string(host_pid) + kEndpointSuffix;
+}
+// The endpoint of the n-th host hotpp mcp (pid `mcp_pid`) launches.
+inline std::string launch_endpoint(uint32_t mcp_pid, int n) {
+    return endpoint_prefix() + "-mcp-" + std::to_string(mcp_pid) + "-" + std::to_string(n) + kEndpointSuffix;
 }
 
 } // namespace hotpp
 
 // ---- src/agent/platform.h ----------------------------------------------------
-// OS layer of the agent: platform_linux.cpp, threads_linux.cpp.
+// OS layer of the agent: platform_linux.cpp and threads_linux.cpp, or
+// platform_win.cpp and threads_win.cpp.
 
 
 #include <cstddef>
@@ -772,9 +798,24 @@ namespace hotpp::agent {
 struct Connection;
 struct Thread;
 
+// What this agent reports in its hello.
+extern const proto::Platform kPlatform;
+// Characters that separate path components; the first is the one to join with.
+#ifdef _WIN32
+inline constexpr const char kPathSeparators[] = "\\/";
+#else
+inline constexpr const char kPathSeparators[] = "/";
+#endif
+
 uint32_t current_pid();
 std::string executable_path();
 std::string get_env(const char* name); // empty if unset
+bool set_env(const char* name, const std::string& value);
+bool file_readable(const std::string& path);
+std::string current_directory(); // empty if unknown
+// Return addresses of the calling thread's callers, innermost first, skipping the
+// caller of capture_stack() itself and `skip` more frames.
+std::vector<uint64_t> capture_stack(int skip, int max_frames);
 
 // All loaded modules; element 0 is the main executable.
 std::vector<proto::ModuleRecord> enumerate_modules();
@@ -819,9 +860,10 @@ void ipc_shutdown(Connection* c); // unblocks a pending ipc_recv on another thre
 bool ipc_readable(Connection* c, int ms);
 void ipc_close(Connection* c);
 
-// The command line the process was started with (/proc/self/cmdline).
+// The command line the process was started with.
 std::vector<std::string> command_line();
-// Replaces the process image; returns only on failure (with errno-style text).
+// Hot restart: runs the (rebuilt) executable at `path` with `argv` in place of this
+// process. Returns only on failure, with the reason.
 std::string exec_self(const std::string& path, const std::vector<std::string>& argv);
 
 // Starts `program` (searched on PATH) without waiting for it.
@@ -942,6 +984,7 @@ std::vector<uint64_t> near_region_candidates(const std::vector<AddressRange>& fr
 #include <ctime>
 
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <link.h>
 #include <poll.h>
@@ -966,6 +1009,8 @@ namespace hotpp::agent {
 
 // --- process -------------------------------------------------------------------
 
+const proto::Platform kPlatform = proto::Platform::Linux;
+
 uint32_t current_pid() { return uint32_t(getpid()); }
 
 std::string executable_path() {
@@ -977,6 +1022,24 @@ std::string executable_path() {
 std::string get_env(const char* name) {
     const char* v = std::getenv(name);
     return v ? v : "";
+}
+
+bool set_env(const char* name, const std::string& value) { return setenv(name, value.c_str(), 1) == 0; }
+
+bool file_readable(const std::string& path) { return access(path.c_str(), R_OK) == 0; }
+
+std::string current_directory() {
+    char cwd[PATH_MAX];
+    return getcwd(cwd, sizeof cwd) ? std::string(cwd) : std::string();
+}
+
+__attribute__((noinline)) std::vector<uint64_t> capture_stack(int skip, int max_frames) {
+    void* stack[128];
+    const int depth = backtrace(stack, std::min(max_frames + skip + 2, 128));
+    std::vector<uint64_t> frames;
+    // [0] is in capture_stack, [1] in its caller.
+    for (int i = 2 + skip; i < depth; ++i) frames.push_back(uint64_t(reinterpret_cast<uintptr_t>(stack[i])));
+    return frames;
 }
 
 uint64_t page_size() {
@@ -1702,7 +1765,6 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
 
 #include <algorithm>
 #include <atomic>
-#include <climits>
 #include <cstdint>
 #include <cstdarg>
 #include <cstdio>
@@ -1710,9 +1772,6 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
 #include <mutex>
 #include <string>
 #include <vector>
-
-#include <execinfo.h>
-#include <unistd.h>
 
 namespace hotpp {
 
@@ -1832,8 +1891,8 @@ void restart_now() {
     AgentState& s = state();
     run_hooks(detail::HookKind::PreRestart);
     agent::log("restarting %s", s.exe.c_str());
-    const char* count = std::getenv("HOTPP_RESTARTED");
-    setenv("HOTPP_RESTARTED", std::to_string((count ? std::atoi(count) : 0) + 1).c_str(), 1);
+    const std::string count = agent::get_env("HOTPP_RESTARTED");
+    agent::set_env("HOTPP_RESTARTED", std::to_string((count.empty() ? 0 : std::atoi(count.c_str())) + 1));
     std::fflush(nullptr);
     s.stopping = true;
     {
@@ -2051,17 +2110,18 @@ std::string pick(const char* configured, const char* env_name, const std::string
 // executable's directory and its parents (a CMake build tree keeps the file at its
 // top), then the working directory.
 std::string find_compile_commands(const std::string& exe) {
-    auto readable = [](const std::string& p) { return access(p.c_str(), R_OK) == 0; };
-    std::string dir = exe.substr(0, exe.rfind('/'));
+    auto last_separator = [](const std::string& p) { return p.find_last_of(agent::kPathSeparators); };
+    std::string dir = exe.substr(0, std::min(last_separator(exe), exe.size()));
     for (int depth = 0; depth < 8 && !dir.empty(); ++depth) {
-        const std::string candidate = dir + "/compile_commands.json";
-        if (readable(candidate)) return candidate;
-        const size_t slash = dir.rfind('/');
+        const std::string candidate = dir + agent::kPathSeparators[0] + "compile_commands.json";
+        if (agent::file_readable(candidate)) return candidate;
+        const size_t slash = last_separator(dir);
         if (slash == std::string::npos || slash == 0) break;
         dir.resize(slash);
     }
-    char cwd[PATH_MAX];
-    if (readable("compile_commands.json") && getcwd(cwd, sizeof cwd)) return std::string(cwd) + "/compile_commands.json";
+    const std::string cwd = agent::current_directory();
+    if (agent::file_readable("compile_commands.json") && !cwd.empty())
+        return cwd + agent::kPathSeparators[0] + "compile_commands.json";
     return {};
 }
 
@@ -2113,8 +2173,8 @@ bool init(const Config& cfg) {
 
     Hello hello;
     hello.pid = agent::current_pid();
-    hello.platform = Platform::Linux;
-#if defined(__x86_64__)
+    hello.platform = agent::kPlatform;
+#if defined(__x86_64__) || defined(_M_X64)
     hello.arch = Arch::X64;
 #endif
     hello.exe = agent::executable_path();
@@ -2195,10 +2255,7 @@ void sync_point() {
     }
     // The functions that called sync_point() keep running their old code until they
     // return; the host tells the user if the patch changed one of them.
-    void* stack[64];
-    const int depth = backtrace(stack, 64);
-    std::vector<uint64_t> frames;
-    for (int i = 1; i < depth; ++i) frames.push_back(uint64_t(reinterpret_cast<uintptr_t>(stack[i])));
+    const std::vector<uint64_t> frames = agent::capture_stack(0, 64);
     for (const Patch& patch : todo) apply_and_report(patch, frames);
     if (s.restart_pending.exchange(false)) restart_now();
 }
@@ -2236,8 +2293,8 @@ void shutdown() {
 bool connected() { return state().connected; }
 
 bool restarted() {
-    const char* count = std::getenv("HOTPP_RESTARTED");
-    return count && std::atoi(count) > 0;
+    const std::string count = agent::get_env("HOTPP_RESTARTED");
+    return !count.empty() && std::atoi(count.c_str()) > 0;
 }
 
 } // namespace hotpp

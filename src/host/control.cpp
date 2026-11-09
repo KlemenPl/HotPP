@@ -9,7 +9,6 @@
 #include <stdexcept>
 #include <thread>
 
-#include <unistd.h>
 
 namespace hotpp::host {
 
@@ -18,7 +17,7 @@ using Clock = std::chrono::steady_clock;
 
 json::Value HostContext::host_json() const {
     json::Value h = json::Value::object();
-    h.set("version", HOTPP_VERSION).set("pid", int64_t(::getpid())).set("endpoint", endpoint);
+    h.set("version", HOTPP_VERSION).set("pid", int64_t(current_pid())).set("endpoint", endpoint);
     h.set("mode", run_mode ? "run" : "serve").set("launched_by_mcp", lifeline);
     h.set("build_command", options.build_command).set("auto_restart", options.auto_restart);
     h.set("auto_reload", options.auto_reload).set("captures_output", output != nullptr);

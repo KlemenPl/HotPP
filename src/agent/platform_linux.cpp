@@ -11,6 +11,7 @@
 #include <ctime>
 
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <link.h>
 #include <poll.h>
@@ -35,6 +36,8 @@ namespace hotpp::agent {
 
 // --- process -------------------------------------------------------------------
 
+const proto::Platform kPlatform = proto::Platform::Linux;
+
 uint32_t current_pid() { return uint32_t(getpid()); }
 
 std::string executable_path() {
@@ -46,6 +49,24 @@ std::string executable_path() {
 std::string get_env(const char* name) {
     const char* v = std::getenv(name);
     return v ? v : "";
+}
+
+bool set_env(const char* name, const std::string& value) { return setenv(name, value.c_str(), 1) == 0; }
+
+bool file_readable(const std::string& path) { return access(path.c_str(), R_OK) == 0; }
+
+std::string current_directory() {
+    char cwd[PATH_MAX];
+    return getcwd(cwd, sizeof cwd) ? std::string(cwd) : std::string();
+}
+
+__attribute__((noinline)) std::vector<uint64_t> capture_stack(int skip, int max_frames) {
+    void* stack[128];
+    const int depth = backtrace(stack, std::min(max_frames + skip + 2, 128));
+    std::vector<uint64_t> frames;
+    // [0] is in capture_stack, [1] in its caller.
+    for (int i = 2 + skip; i < depth; ++i) frames.push_back(uint64_t(reinterpret_cast<uintptr_t>(stack[i])));
+    return frames;
 }
 
 uint64_t page_size() {

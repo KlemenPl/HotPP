@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <climits>
 #include <cstdint>
 #include <cstdarg>
 #include <cstdio>
@@ -17,9 +16,6 @@
 #include <mutex>
 #include <string>
 #include <vector>
-
-#include <execinfo.h>
-#include <unistd.h>
 
 namespace hotpp {
 
@@ -139,8 +135,8 @@ void restart_now() {
     AgentState& s = state();
     run_hooks(detail::HookKind::PreRestart);
     agent::log("restarting %s", s.exe.c_str());
-    const char* count = std::getenv("HOTPP_RESTARTED");
-    setenv("HOTPP_RESTARTED", std::to_string((count ? std::atoi(count) : 0) + 1).c_str(), 1);
+    const std::string count = agent::get_env("HOTPP_RESTARTED");
+    agent::set_env("HOTPP_RESTARTED", std::to_string((count.empty() ? 0 : std::atoi(count.c_str())) + 1));
     std::fflush(nullptr);
     s.stopping = true;
     {
@@ -358,17 +354,18 @@ std::string pick(const char* configured, const char* env_name, const std::string
 // executable's directory and its parents (a CMake build tree keeps the file at its
 // top), then the working directory.
 std::string find_compile_commands(const std::string& exe) {
-    auto readable = [](const std::string& p) { return access(p.c_str(), R_OK) == 0; };
-    std::string dir = exe.substr(0, exe.rfind('/'));
+    auto last_separator = [](const std::string& p) { return p.find_last_of(agent::kPathSeparators); };
+    std::string dir = exe.substr(0, std::min(last_separator(exe), exe.size()));
     for (int depth = 0; depth < 8 && !dir.empty(); ++depth) {
-        const std::string candidate = dir + "/compile_commands.json";
-        if (readable(candidate)) return candidate;
-        const size_t slash = dir.rfind('/');
+        const std::string candidate = dir + agent::kPathSeparators[0] + "compile_commands.json";
+        if (agent::file_readable(candidate)) return candidate;
+        const size_t slash = last_separator(dir);
         if (slash == std::string::npos || slash == 0) break;
         dir.resize(slash);
     }
-    char cwd[PATH_MAX];
-    if (readable("compile_commands.json") && getcwd(cwd, sizeof cwd)) return std::string(cwd) + "/compile_commands.json";
+    const std::string cwd = agent::current_directory();
+    if (agent::file_readable("compile_commands.json") && !cwd.empty())
+        return cwd + agent::kPathSeparators[0] + "compile_commands.json";
     return {};
 }
 
@@ -420,8 +417,8 @@ bool init(const Config& cfg) {
 
     Hello hello;
     hello.pid = agent::current_pid();
-    hello.platform = Platform::Linux;
-#if defined(__x86_64__)
+    hello.platform = agent::kPlatform;
+#if defined(__x86_64__) || defined(_M_X64)
     hello.arch = Arch::X64;
 #endif
     hello.exe = agent::executable_path();
@@ -502,10 +499,7 @@ void sync_point() {
     }
     // The functions that called sync_point() keep running their old code until they
     // return; the host tells the user if the patch changed one of them.
-    void* stack[64];
-    const int depth = backtrace(stack, 64);
-    std::vector<uint64_t> frames;
-    for (int i = 1; i < depth; ++i) frames.push_back(uint64_t(reinterpret_cast<uintptr_t>(stack[i])));
+    const std::vector<uint64_t> frames = agent::capture_stack(0, 64);
     for (const Patch& patch : todo) apply_and_report(patch, frames);
     if (s.restart_pending.exchange(false)) restart_now();
 }
@@ -543,8 +537,8 @@ void shutdown() {
 bool connected() { return state().connected; }
 
 bool restarted() {
-    const char* count = std::getenv("HOTPP_RESTARTED");
-    return count && std::atoi(count) > 0;
+    const std::string count = agent::get_env("HOTPP_RESTARTED");
+    return !count.empty() && std::atoi(count.c_str()) > 0;
 }
 
 } // namespace hotpp

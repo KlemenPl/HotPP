@@ -2,8 +2,6 @@
 
 #include <algorithm>
 
-#include <sys/eventfd.h>
-#include <unistd.h>
 
 namespace hotpp::host {
 
@@ -67,15 +65,12 @@ SessionRequest::Result SessionRequest::result() const {
 SessionHandle::SessionHandle(Registry& registry, uint32_t pid, uint64_t session, bool auto_reload)
     : registry_(registry), pid_(pid), session_(session), default_auto_reload_(auto_reload),
       auto_reload_(auto_reload) {
-    wake_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     info_.pid = pid;
     info_.session = session;
     info_.auto_reload = auto_reload;
 }
 
-SessionHandle::~SessionHandle() {
-    if (wake_fd_ >= 0) ::close(wake_fd_);
-}
+SessionHandle::~SessionHandle() = default;
 
 SessionInfo SessionHandle::info() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -107,19 +102,9 @@ std::vector<std::shared_ptr<SessionRequest>> SessionHandle::take_requests() {
     return std::move(requests_);
 }
 
-void SessionHandle::wake() {
-    if (wake_fd_ < 0) return;
-    const uint64_t one = 1;
-    ssize_t n = ::write(wake_fd_, &one, sizeof one);
-    (void)n;
-}
+void SessionHandle::wake() { wake_.set(); }
 
-void SessionHandle::drain_wake() {
-    if (wake_fd_ < 0) return;
-    uint64_t v;
-    ssize_t n = ::read(wake_fd_, &v, sizeof v);
-    (void)n;
-}
+void SessionHandle::drain_wake() { wake_.reset(); }
 
 void SessionHandle::close(const std::string& outcome, const std::string& why) {
     std::vector<std::shared_ptr<SessionRequest>> queued;

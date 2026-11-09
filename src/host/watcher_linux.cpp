@@ -17,7 +17,7 @@ namespace {
 
 class InotifyWatcher final : public FileWatcher {
 public:
-    InotifyWatcher(int fd, int wake_fd) : fd_(fd), wake_fd_(wake_fd) {}
+    InotifyWatcher(int fd, const WakeEvent* wake) : fd_(fd), wake_(wake), wake_fd_(wake ? int(wake->native()) : -1) {}
     ~InotifyWatcher() override { ::close(fd_); }
 
     bool add(const std::filesystem::path& dir, std::string& error) override {
@@ -46,9 +46,7 @@ private:
         int rc = ::poll(p, wake_fd_ >= 0 ? 2 : 1, ms);
         if (rc <= 0) return false;
         if (wake_fd_ >= 0 && (p[1].revents & POLLIN)) {
-            uint64_t v;
-            ssize_t r = ::read(wake_fd_, &v, sizeof v);
-            (void)r;
+            wake_->reset();
             if (!(p[0].revents & POLLIN)) return false;
             read_events(changed);
             return false;
@@ -74,6 +72,7 @@ private:
     }
 
     int fd_;
+    const WakeEvent* wake_;
     int wake_fd_;
     std::unordered_map<int, std::filesystem::path> dirs_;
 };
@@ -81,13 +80,13 @@ private:
 } // namespace
 
 std::unique_ptr<FileWatcher> watch_directories(const std::vector<std::filesystem::path>& dirs,
-                                               std::string& error, int wake_fd) {
+                                               std::string& error, const WakeEvent* wake) {
     int fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
     if (fd < 0) {
         error = std::string("inotify_init1: ") + std::strerror(errno);
         return nullptr;
     }
-    auto w = std::make_unique<InotifyWatcher>(fd, wake_fd);
+    auto w = std::make_unique<InotifyWatcher>(fd, wake);
     for (const auto& d : dirs)
         if (!w->add(d, error)) return nullptr;
     return w;

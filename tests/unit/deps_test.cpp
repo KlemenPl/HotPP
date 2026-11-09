@@ -42,3 +42,30 @@ HOTPP_TEST(dependency_graph_tracks_includers) {
     CHECK(g.includers("/s/common.h").size() == 1);
     CHECK(g.headers().size() == 2);
 }
+
+HOTPP_TEST(msvc_dependency_scan_arguments) {
+    CompileCommand cmd;
+    cmd.arguments = {"cl.exe", "/O2", "/FoC:\\b\\x.obj", "/c", "C:\\s\\x.cpp"};
+    const auto a = dependency_scan_arguments(cmd, "C:\\cache\\x.d");
+    CHECK(std::find(a.begin(), a.end(), "/c") == a.end());
+    CHECK(std::find(a.begin(), a.end(), "/Zs") != a.end());
+    CHECK(std::find(a.begin(), a.end(), "/sourceDependencies") != a.end());
+    CHECK(std::none_of(a.begin(), a.end(), [](const std::string& s) { return s.rfind("/Fo", 0) == 0; }));
+
+    cmd.arguments = {"clang-cl", "/c", "--", "/s/x.cpp"};
+    const auto c = dependency_scan_arguments(cmd, "/cache/x.d");
+    CHECK(std::find(c.begin(), c.end(), "/clang:-MM") != c.end());
+    CHECK(std::find(c.begin(), c.end(), "/clang:-MF/cache/x.d") != c.end());
+    CHECK(c.back() == "/s/x.cpp");
+}
+
+HOTPP_TEST(source_dependencies_json_drops_system_headers) {
+    const std::string json = R"({"Version":"1.1","Data":{"Source":"/s/x.cpp","ProvidedModule":"",
+        "Includes":["/s/x.h","/sdk/include/windows.h","/s/sub/y.h"],"ImportedModules":[],"ImportedHeaderUnits":[]}})";
+    const auto deps = parse_source_dependencies(json, {"/sdk/include"});
+    CHECK(deps.size() == 3);
+    CHECK(std::find(deps.begin(), deps.end(), std::filesystem::path("/s/x.h")) != deps.end());
+    CHECK(std::find(deps.begin(), deps.end(), std::filesystem::path("/s/sub/y.h")) != deps.end());
+    CHECK(std::find(deps.begin(), deps.end(), std::filesystem::path("/sdk/include/windows.h")) == deps.end());
+    CHECK(parse_source_dependencies("not json", {}).empty());
+}

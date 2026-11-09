@@ -22,6 +22,14 @@ std::vector<std::filesystem::path> parse_depfile(const std::string& text, const 
 // `depfile` without compiling.
 std::vector<std::string> dependency_scan_arguments(const CompileCommand& cmd, const std::filesystem::path& depfile);
 
+// The files a dependency file written for `cmd` (by a scan or a patch compile)
+// lists: a make-style depfile, or cl's /sourceDependencies JSON, from which system
+// headers are dropped. Empty if it can't be read.
+std::vector<std::filesystem::path> read_dependencies(const CompileCommand& cmd, const std::filesystem::path& depfile);
+// Paths in cl's /sourceDependencies JSON, without headers under `system_dirs`.
+std::vector<std::filesystem::path> parse_source_dependencies(const std::string& json,
+                                                             const std::vector<std::filesystem::path>& system_dirs);
+
 class DependencyGraph {
 public:
     // Replaces what `tu` includes. `deps` may contain the TU itself; it's ignored.

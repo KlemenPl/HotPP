@@ -1,4 +1,5 @@
-// OS layer of the agent: platform_linux.cpp, threads_linux.cpp.
+// OS layer of the agent: platform_linux.cpp and threads_linux.cpp, or
+// platform_win.cpp and threads_win.cpp.
 #pragma once
 
 #include "common/messages.h"
@@ -13,9 +14,24 @@ namespace hotpp::agent {
 struct Connection;
 struct Thread;
 
+// What this agent reports in its hello.
+extern const proto::Platform kPlatform;
+// Characters that separate path components; the first is the one to join with.
+#ifdef _WIN32
+inline constexpr const char kPathSeparators[] = "\\/";
+#else
+inline constexpr const char kPathSeparators[] = "/";
+#endif
+
 uint32_t current_pid();
 std::string executable_path();
 std::string get_env(const char* name); // empty if unset
+bool set_env(const char* name, const std::string& value);
+bool file_readable(const std::string& path);
+std::string current_directory(); // empty if unknown
+// Return addresses of the calling thread's callers, innermost first, skipping the
+// caller of capture_stack() itself and `skip` more frames.
+std::vector<uint64_t> capture_stack(int skip, int max_frames);
 
 // All loaded modules; element 0 is the main executable.
 std::vector<proto::ModuleRecord> enumerate_modules();
@@ -60,9 +76,10 @@ void ipc_shutdown(Connection* c); // unblocks a pending ipc_recv on another thre
 bool ipc_readable(Connection* c, int ms);
 void ipc_close(Connection* c);
 
-// The command line the process was started with (/proc/self/cmdline).
+// The command line the process was started with.
 std::vector<std::string> command_line();
-// Replaces the process image; returns only on failure (with errno-style text).
+// Hot restart: runs the (rebuilt) executable at `path` with `argv` in place of this
+// process. Returns only on failure, with the reason.
 std::string exec_self(const std::string& path, const std::vector<std::string>& argv);
 
 // Starts `program` (searched on PATH) without waiting for it.

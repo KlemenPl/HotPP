@@ -35,13 +35,24 @@ private:
 std::vector<std::string> expand_response_files(const std::vector<std::string>& args,
                                                const std::filesystem::path& directory, int depth = 0);
 
-// Splits a shell command line (POSIX quoting rules) into arguments.
-std::vector<std::string> split_command_line(const std::string& command);
+// Splits a command line into arguments: POSIX shell quoting, or with `windows` the
+// rules of CommandLineToArgvW (what compile_commands.json uses on Windows).
+std::vector<std::string> split_command_line(const std::string& command, bool windows = false);
+// Splits with the rules of the system HotPP runs on.
+std::vector<std::string> split_native_command_line(const std::string& command);
 
-// The original arguments with the output redirected to `output`, dependency-file
-// flags removed (they would overwrite the build's own) and the flags patches rely
-// on added.
-std::vector<std::string> patch_compile_arguments(const CompileCommand& cmd, const std::filesystem::path& output);
+// How a compiler takes its arguments: gcc/clang style (-o, -MF), or MSVC style
+// (cl.exe, and clang-cl, which accepts cl's syntax).
+enum class Driver { Gnu, Cl, ClangCl };
+Driver driver_of(const CompileCommand& cmd);
+inline bool msvc_style(Driver d) { return d != Driver::Gnu; }
+
+// The original arguments with the output redirected to `output`, the compiler
+// told to write the TU's dependencies to `depfile` (see read_dependencies), the
+// build's own dependency-file flags removed (they would overwrite its files) and
+// the flags patches rely on added. Without `depfile`, no dependencies are written.
+std::vector<std::string> patch_compile_arguments(const CompileCommand& cmd, const std::filesystem::path& output,
+                                                 const std::filesystem::path& depfile = {});
 
 // Absolute, lexically normal form used for all path comparisons.
 std::filesystem::path normalize_path(const std::filesystem::path& p, const std::filesystem::path& base = {});

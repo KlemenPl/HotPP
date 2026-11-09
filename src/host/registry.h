@@ -3,6 +3,8 @@
 // everything else of a Session stays on its own threads.
 #pragma once
 
+#include "host/platform.h"
+
 #include "host/events.h"
 #include "host/report.h"
 #include "host/util/json.h"
@@ -94,8 +96,8 @@ public:
     // Queues a request and wakes the watcher thread. False once closed.
     bool post(std::shared_ptr<SessionRequest> request);
     std::vector<std::shared_ptr<SessionRequest>> take_requests();
-    // Becomes readable when a request is posted or auto-reload changes (the watcher polls it).
-    int wake_fd() const { return wake_fd_; }
+    // Set when a request is posted or auto-reload changes (the watcher waits for it).
+    const WakeEvent& wake_event() const { return wake_; }
     void drain_wake();
 
     // Stops accepting requests and finishes queued ones with `outcome` / `why`.
@@ -113,7 +115,7 @@ private:
     const uint64_t session_;
     const bool default_auto_reload_;
     std::atomic<bool> auto_reload_;
-    int wake_fd_ = -1;
+    WakeEvent wake_;
 
     mutable std::mutex mutex_;
     SessionInfo info_;

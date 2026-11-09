@@ -2,18 +2,11 @@
 
 #include "common/endpoint.h"
 #include "host/control_protocol.h"
+#include "host/platform.h"
 
 #include <algorithm>
-#include <cerrno>
-#include <csignal>
-#include <cstring>
 #include <filesystem>
 #include <set>
-
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 namespace hotpp::mcp {
 
@@ -199,16 +192,7 @@ Hosts::~Hosts() { stop_all(6s); }
 
 std::vector<std::string> Hosts::candidate_endpoints() {
     std::set<std::string> found;
-    const fs::path prefix = endpoint_prefix();
-    const std::string base = prefix.filename().string();
-    std::error_code ec;
-    for (const auto& e : fs::directory_iterator(prefix.parent_path(), ec)) {
-        const std::string name = e.path().filename().string();
-        const bool ours = name == base + ".sock" ||
-                          (name.rfind(base + "-", 0) == 0 && name.size() > 5 && name.compare(name.size() - 5, 5, ".sock") == 0);
-        std::error_code sec;
-        if (ours && e.is_socket(sec)) found.insert(e.path().string());
-    }
+    for (const std::string& ep : host::list_endpoints(endpoint_prefix())) found.insert(ep);
     for (const std::string& ep : options_.endpoints) found.insert(ep);
     if (const char* env = std::getenv("HOTPP_ENDPOINT"); env && *env) found.insert(env);
     return {found.begin(), found.end()};
@@ -221,14 +205,9 @@ std::shared_ptr<Launched> Hosts::launched_at(const std::string& endpoint) {
 }
 
 namespace {
-// Identifies a socket file, so a host that was incompatible isn't probed again
-// until the file is replaced.
-std::string identity(const std::string& path) {
-    struct stat st{};
-    if (::stat(path.c_str(), &st) != 0) return {};
-    return std::to_string(st.st_ino) + ":" + std::to_string(st.st_mtim.tv_sec) + "." +
-           std::to_string(st.st_mtim.tv_nsec);
-}
+// Identifies an endpoint, so a host that was incompatible isn't probed again until
+// it is replaced.
+std::string identity(const std::string& endpoint) { return host::endpoint_identity(endpoint); }
 } // namespace
 
 std::vector<Hosts::Entry> Hosts::discover() {
@@ -368,28 +347,21 @@ std::shared_ptr<Launched> Hosts::launch(const LaunchSpec& spec, std::shared_ptr<
     if (!options_.allow_launch) throw HostError("launching programs is turned off (hotpp mcp --no-launch)");
     if (spec.command.empty() || spec.command[0].empty()) throw HostError("'command' needs at least the program to run");
 
-    char self[4096];
-    const ssize_t n = ::readlink("/proc/self/exe", self, sizeof self - 1);
-    const std::string self_name = n > 0 ? std::string(self, size_t(n)) : "hotpp";
-    const std::string endpoint = endpoint_prefix() + "-mcp-" + std::to_string(::getpid()) + "-" +
-                                 std::to_string(next_launch_++) + ".sock";
+    const std::string self = host::self_executable().string();
+    const std::string endpoint = launch_endpoint(host::current_pid(), next_launch_++);
 
-    // Both pipes end up on fixed fds in the host; keep ours clear of those numbers.
-    auto high = [](int fd) {
-        const int moved = ::fcntl(fd, F_DUPFD_CLOEXEC, 10);
-        ::close(fd);
-        return moved;
-    };
-    int life[2], out[2];
-    if (::pipe2(life, O_CLOEXEC) != 0) throw HostError(std::string("pipe: ") + std::strerror(errno));
-    if (::pipe2(out, O_CLOEXEC) != 0) {
-        ::close(life[0]);
-        ::close(life[1]);
-        throw HostError(std::string("pipe: ") + std::strerror(errno));
+    std::string error;
+    host::Pipe life, out;
+    if (!host::make_pipe(life, error)) throw HostError(error);
+    if (!host::make_pipe(out, error)) {
+        host::close_handle(life.read);
+        host::close_handle(life.write);
+        throw HostError(error);
     }
-    const int life_r = high(life[0]), life_w = high(life[1]), out_r = high(out[0]), out_w = high(out[1]);
+    const host::Handle life_r = life.read, life_w = life.write, out_r = out.read, out_w = out.write;
 
-    std::vector<std::string> argv = {self_name, "--endpoint", endpoint, "--capture-output", "--lifeline", "3"};
+    std::vector<std::string> argv = {self, "--endpoint", endpoint, "--capture-output", "--lifeline",
+                                     host::handle_argument(life_r, 3)};
     if (!spec.auto_reload) argv.push_back("--no-auto-reload");
     if (!spec.build_command.empty()) argv.insert(argv.end(), {"--build", spec.build_command});
     if (spec.auto_restart) argv.push_back("--auto-restart");
@@ -397,19 +369,18 @@ std::shared_ptr<Launched> Hosts::launch(const LaunchSpec& spec, std::shared_ptr<
     argv.insert(argv.end(), spec.command.begin(), spec.command.end());
 
     host::SpawnOptions opt;
-    opt.program = "/proc/self/exe";
+    opt.program = self;
     opt.cwd = spec.cwd;
     opt.null_stdin = true;
-    opt.fds = {{out_w, STDOUT_FILENO}, {out_w, STDERR_FILENO}, {life_r, 3}};
+    opt.handles = {{out_w, 1}, {out_w, 2}, {life_r, 3}};
     opt.env = spec.env;
     opt.new_process_group = true; // Ctrl+C in the agent's terminal doesn't reach it; the lifeline ends it
-    std::string error;
     const int pid = host::spawn_process(argv, opt, error);
-    ::close(life_r);
-    ::close(out_w);
+    host::close_handle(life_r);
+    host::close_handle(out_w);
     if (pid < 0) {
-        ::close(life_w);
-        ::close(out_r);
+        host::close_handle(life_w);
+        host::close_handle(out_r);
         throw HostError(error);
     }
 
@@ -424,21 +395,18 @@ std::shared_ptr<Launched> Hosts::launch(const LaunchSpec& spec, std::shared_ptr<
         constexpr size_t kKeep = 64 * 1024;
         char buf[4096];
         for (;;) {
-            const ssize_t got = ::read(out_r, buf, sizeof buf);
-            if (got < 0 && errno == EINTR) continue;
+            const long got = host::read_some(out_r, buf, sizeof buf);
             if (got <= 0) break;
             std::lock_guard<std::mutex> lock(raw->mutex);
             raw->output.append(buf, size_t(got));
             if (raw->output.size() > kKeep + kKeep / 4) raw->output.erase(0, raw->output.size() - kKeep);
         }
-        ::close(out_r);
+        host::close_handle(out_r);
     });
     l->reaper = std::thread([raw, pid] {
-        int st = 0;
-        while (::waitpid(pid, &st, 0) < 0 && errno == EINTR) {
-        }
+        const int status = host::wait_child(pid, {});
         std::lock_guard<std::mutex> lock(raw->mutex);
-        raw->status = WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? 128 + WTERMSIG(st) : -1;
+        raw->status = status;
         raw->done = true;
         raw->cv.notify_all();
     });
@@ -479,11 +447,11 @@ void Hosts::forget(const std::shared_ptr<Launched>& l) {
         clients_.erase(l->endpoint);
     }
     std::unique_lock<std::mutex> lock(l->mutex);
-    if (l->lifeline >= 0) {
-        ::close(l->lifeline); // the host stops its program and exits
-        l->lifeline = -1;
+    if (l->lifeline != host::kNoHandle) {
+        host::close_handle(l->lifeline); // the host stops its program and exits
+        l->lifeline = host::kNoHandle;
     }
-    if (!l->cv.wait_for(lock, 7s, [&] { return l->done; })) ::kill(-l->host_pid, SIGKILL);
+    if (!l->cv.wait_for(lock, 7s, [&] { return l->done; })) host::kill_process_group(l->host_pid);
     lock.unlock();
     if (l->reaper.joinable()) l->reaper.join();
     if (l->reader.joinable()) l->reader.join();
@@ -498,15 +466,15 @@ void Hosts::stop_all(std::chrono::milliseconds grace) {
     }
     for (const auto& l : all) {
         std::lock_guard<std::mutex> lock(l->mutex);
-        if (l->lifeline >= 0) {
-            ::close(l->lifeline); // the host stops its program and exits
-            l->lifeline = -1;
+        if (l->lifeline != host::kNoHandle) {
+            host::close_handle(l->lifeline); // the host stops its program and exits
+            l->lifeline = host::kNoHandle;
         }
     }
     const auto deadline = Clock::now() + grace;
     for (const auto& l : all) {
         std::unique_lock<std::mutex> lock(l->mutex);
-        if (!l->cv.wait_until(lock, deadline, [&] { return l->done; })) ::kill(-l->host_pid, SIGKILL);
+        if (!l->cv.wait_until(lock, deadline, [&] { return l->done; })) host::kill_process_group(l->host_pid);
     }
     for (const auto& l : all) {
         if (l->reaper.joinable()) l->reaper.join();

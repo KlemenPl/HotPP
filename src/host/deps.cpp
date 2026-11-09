@@ -1,8 +1,12 @@
 #include "host/deps.h"
 
 #include "host/platform.h"
+#include "host/util/json.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <sstream>
@@ -61,6 +65,24 @@ std::vector<fs::path> parse_depfile(const std::string& text, const fs::path& bas
 }
 
 std::vector<std::string> dependency_scan_arguments(const CompileCommand& cmd, const fs::path& depfile) {
+    const Driver driver = driver_of(cmd);
+    if (msvc_style(driver)) {
+        // Like a patch compile, but only preprocessing / syntax checking.
+        std::vector<std::string> out;
+        for (const std::string& a : patch_compile_arguments(cmd, fs::path(depfile).replace_extension(".obj"), depfile)) {
+            if (a == "/c" || a == "-c" || a == "/Z7" || a == "/Gy" || a == "/Gw" || a.rfind("/Fo", 0) == 0) continue;
+            out.push_back(a);
+        }
+        // cl: /Zs checks syntax without writing an object. clang-cl: -MM preprocesses only.
+        auto at = std::find(out.begin(), out.end(), std::string("--"));
+        if (driver == Driver::Cl) {
+            out.insert(at, "/Zs");
+        } else {
+            for (std::string& a : out)
+                if (a == "/clang:-MMD") a = "/clang:-MM";
+        }
+        return out;
+    }
     std::vector<std::string> out;
     const auto& a = cmd.arguments;
     for (size_t i = 0; i < a.size(); ++i) {
@@ -79,6 +101,79 @@ std::vector<std::string> dependency_scan_arguments(const CompileCommand& cmd, co
     out.push_back("-MF");
     out.push_back(depfile.string());
     return out;
+}
+
+namespace {
+
+std::string read_text(const fs::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+// Where cl finds system headers: %INCLUDE%, /external:I and /imsvc directories.
+std::vector<fs::path> msvc_system_dirs(const CompileCommand& cmd) {
+    std::vector<fs::path> dirs;
+    if (const char* inc = std::getenv("INCLUDE")) {
+        std::string list = inc;
+        size_t start = 0;
+        while (start <= list.size()) {
+            const size_t end = std::min(list.find(';', start), list.size());
+            if (end > start) dirs.push_back(normalize_path(list.substr(start, end - start)));
+            start = end + 1;
+        }
+    }
+    const auto& a = cmd.arguments;
+    for (size_t i = 1; i < a.size(); ++i) {
+        for (const char* flag : {"/external:I", "-external:I", "/imsvc", "-imsvc"}) {
+            const size_t n = std::strlen(flag);
+            if (a[i].compare(0, n, flag) != 0) continue;
+            const std::string dir = a[i].size() > n ? a[i].substr(n) : (i + 1 < a.size() ? a[++i] : std::string());
+            if (!dir.empty()) dirs.push_back(normalize_path(dir, cmd.directory));
+            break;
+        }
+    }
+    return dirs;
+}
+
+bool under(const fs::path& p, const fs::path& dir) {
+    auto d = dir.begin(), q = p.begin();
+    for (; d != dir.end(); ++d, ++q) {
+        if (d->empty()) continue;
+        if (q == p.end() || *q != *d) return false;
+    }
+    return true;
+}
+
+} // namespace
+
+std::vector<fs::path> parse_source_dependencies(const std::string& text, const std::vector<fs::path>& system_dirs) {
+    std::vector<fs::path> out;
+    json::Value doc;
+    try {
+        doc = json::Value::parse(text);
+    } catch (const std::exception&) {
+        return out;
+    }
+    const json::Value* data = doc.get("Data");
+    const json::Value* includes = data ? data->get("Includes") : nullptr;
+    if (!includes || !includes->is_array()) return out;
+    for (const json::Value& v : includes->as_array()) {
+        if (!v.is_string()) continue;
+        const fs::path p = normalize_path(v.as_string());
+        if (std::none_of(system_dirs.begin(), system_dirs.end(), [&](const fs::path& d) { return under(p, d); }))
+            out.push_back(p);
+    }
+    if (const json::Value* source = data->get("Source"); source && source->is_string())
+        out.push_back(normalize_path(source->as_string()));
+    return out;
+}
+
+std::vector<fs::path> read_dependencies(const CompileCommand& cmd, const fs::path& depfile) {
+    const std::string text = read_text(depfile);
+    if (driver_of(cmd) == Driver::Cl) return parse_source_dependencies(text, msvc_system_dirs(cmd));
+    return parse_depfile(text, cmd.directory);
 }
 
 void DependencyGraph::set(const fs::path& tu, const std::vector<fs::path>& deps) {
@@ -109,13 +204,6 @@ std::set<fs::path> DependencyGraph::headers() const {
 }
 
 namespace {
-
-std::string read_file(const fs::path& p) {
-    std::ifstream in(p, std::ios::binary);
-    std::stringstream ss;
-    ss << in.rdbuf();
-    return ss.str();
-}
 
 // A cached depfile is usable if no file it lists (and not the TU) changed after it.
 bool cache_fresh(const fs::path& depfile, const fs::path& tu, const std::vector<fs::path>& deps) {
@@ -152,7 +240,7 @@ size_t scan_dependencies(const std::vector<const CompileCommand*>& units, const 
             const fs::path depfile = cache_dir / name;
 
             if (fs::exists(depfile, ec)) {
-                const auto deps = parse_depfile(read_file(depfile), cmd.directory);
+                const auto deps = read_dependencies(cmd, depfile);
                 if (!deps.empty() && cache_fresh(depfile, cmd.file, deps)) {
                     graph.set(cmd.file, deps);
                     continue;
@@ -164,7 +252,7 @@ size_t scan_dependencies(const std::vector<const CompileCommand*>& units, const 
                 ++failed;
                 continue;
             }
-            graph.set(cmd.file, parse_depfile(read_file(depfile), cmd.directory));
+            graph.set(cmd.file, read_dependencies(cmd, depfile));
         }
     };
     std::vector<std::thread> threads;

@@ -3,13 +3,12 @@
 // fd 1 points at stderr for anything that prints by accident.
 #include "mcp/mcp.h"
 
+#include "host/platform.h"
 #include "mcp/hosts.h"
 #include "mcp/server.h"
 #include "mcp/tools.h"
 
 #include <atomic>
-#include <cerrno>
-#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -17,12 +16,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <fcntl.h>
-#include <poll.h>
-#include <pthread.h>
-#include <sys/eventfd.h>
-#include <unistd.h>
 
 namespace hotpp::mcp {
 
@@ -38,7 +31,7 @@ constexpr const char* kUsage =
     "  claude mcp add hotpp -- hotpp mcp --build \"cmake --build build\"\n"
     "\n"
     "options:\n"
-    "  --build <command>   default rebuild command for launched programs (/bin/sh -c)\n"
+    "  --build <command>   default rebuild command for launched programs (run with the shell)\n"
     "  --endpoint <path>   also control the host listening there (repeatable)\n"
     "  --no-launch         don't start, stop or restart programs; only observe and patch\n"
     "  --structured        also return structuredContent (for scripts; agents read the text)\n"
@@ -46,18 +39,13 @@ constexpr const char* kUsage =
 
 constexpr size_t kMaxLine = 16u << 20;
 
-// Writes all of `data` to `fd`; false if it's gone.
-bool write_all(int fd, const char* data, size_t size) {
-    while (size > 0) {
-        const ssize_t n = ::write(fd, data, size);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return false;
-        }
-        data += n;
-        size -= size_t(n);
-    }
-    return true;
+// Set by a stop request (Ctrl+C, SIGTERM, SIGHUP): ends the server like end of input.
+std::atomic<bool> g_stopping{false};
+host::WakeEvent* g_wake = nullptr;
+
+void on_stop(host::StopRequest) {
+    g_stopping = true;
+    if (g_wake) g_wake->set();
 }
 
 } // namespace
@@ -91,35 +79,20 @@ int run(int argc, char** argv) {
     std::error_code ec;
     tools_options.cwd = std::filesystem::current_path(ec).string();
 
-    // The protocol gets a private copy of stdout; fd 1 becomes stderr.
+    // The protocol gets a private copy of stdout; stdout itself becomes stderr.
     std::fflush(stdout);
-    const int out = ::fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
-    if (out < 0) {
-        std::perror("hotpp mcp: stdout");
+    std::string error;
+    const host::Handle out = host::take_stdout(error);
+    if (out == host::kNoHandle) {
+        std::fprintf(stderr, "hotpp mcp: %s\n", error.c_str());
         return 1;
     }
-    ::dup2(STDERR_FILENO, STDOUT_FILENO);
 
-    // Signals: SIGPIPE ignored (a closed stdout is noticed by write), SIGINT,
-    // SIGTERM and SIGHUP end the server like end of input. Blocked before any thread
-    // starts, so only the waiter below takes them.
-    signal(SIGPIPE, SIG_IGN);
-    sigset_t stop_signals;
-    sigemptyset(&stop_signals);
-    sigaddset(&stop_signals, SIGINT);
-    sigaddset(&stop_signals, SIGTERM);
-    sigaddset(&stop_signals, SIGHUP);
-    pthread_sigmask(SIG_BLOCK, &stop_signals, nullptr);
-    const int wake = ::eventfd(0, EFD_CLOEXEC);
-    std::atomic<bool> stopping{false};
-    std::thread signal_waiter([&] {
-        int sig = 0;
-        sigwait(&stop_signals, &sig);
-        stopping = true;
-        const uint64_t one = 1;
-        ssize_t n = ::write(wake, &one, sizeof one);
-        (void)n;
-    });
+    // A closed stdout is noticed by write; stop requests end the server like end of input.
+    host::WakeEvent wake;
+    g_wake = &wake;
+    host::install_signal_handlers(on_stop, nullptr);
+    std::atomic<bool>& stopping = g_stopping;
 
     std::mutex out_mutex;
     std::atomic<bool> out_broken{false};
@@ -128,11 +101,9 @@ int run(int argc, char** argv) {
         if (out_broken) return;
         std::string msg = line;
         msg += '\n';
-        if (!write_all(out, msg.data(), msg.size())) {
+        if (!host::write_all(out, msg.data(), msg.size())) {
             out_broken = true;
-            const uint64_t one = 1;
-            ssize_t n = ::write(wake, &one, sizeof one);
-            (void)n;
+            wake.set();
         }
     };
 
@@ -148,18 +119,11 @@ int run(int argc, char** argv) {
         std::string buffer;
         bool discarding = false;
         char chunk[65536];
-        pollfd fds[2] = {{STDIN_FILENO, POLLIN, 0}, {wake, POLLIN, 0}};
+        const host::Handle in = host::stdin_handle();
         while (!stopping && !out_broken) {
-            const int rc = ::poll(fds, 2, -1);
-            if (rc < 0) {
-                if (errno == EINTR) continue;
-                break;
-            }
-            if (fds[1].revents & POLLIN) break;
-            if (!(fds[0].revents & (POLLIN | POLLHUP | POLLERR))) continue;
-            const ssize_t n = ::read(STDIN_FILENO, chunk, sizeof chunk);
-            if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
-            if (n <= 0) break; // end of input: the client is done
+            const long n = host::read_some(in, chunk, sizeof chunk, -1, &wake);
+            if (n == -2) break; // woken: stopping or stdout gone
+            if (n <= 0) break;  // end of input: the client is done
             size_t start = 0;
             for (size_t i = 0; i < size_t(n); ++i) {
                 if (chunk[i] != '\n') continue;
@@ -181,18 +145,13 @@ int run(int argc, char** argv) {
         if (!discarding && !buffer.empty() && !stopping) server.handle_line(buffer); // a last line without newline
         // End of input: let calls in progress finish and answer (the client may still
         // read), unless a signal says to stop now.
-        while (!stopping && !out_broken && !server.idle()) {
-            pollfd w{wake, POLLIN, 0};
-            ::poll(&w, 1, 100);
-        }
+        while (!stopping && !out_broken && !server.idle()) wake.wait(100);
         server.shutdown();
         hosts.stop_all(std::chrono::seconds(6)); // launched programs end with this server
         if (out_broken) exit_code = 0;          // the client went away; nothing to report to
     }
-    // Wake the signal waiter so it can be joined.
-    pthread_kill(signal_waiter.native_handle(), SIGTERM);
-    signal_waiter.join();
-    ::close(out);
+    g_wake = nullptr;
+    host::close_handle(out);
     return exit_code;
 }
 
