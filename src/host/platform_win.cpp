@@ -278,6 +278,7 @@ private:
 
 struct Child {
     HANDLE process = nullptr;
+    HANDLE console_input = nullptr; // the pseudo-console's input: closing it ends the console
     HANDLE job = nullptr;   // new_process_group: the job holding it and what it starts
     HPCON console = nullptr; // spawn_child_pty: closed once the process exits
 };
@@ -662,13 +663,19 @@ int spawn_child_pty(const std::vector<std::string>& args, Handle& output, std::s
     if (create && SUCCEEDED(create(COORD{200, 50}, in_r, out_w, 0, &console))) {
         CloseHandle(in_r);
         CloseHandle(out_w);
-        CloseHandle(in_w); // the program reads nothing
         SpawnOptions opt;
         const int pid = start(args, opt, console, error);
         if (pid < 0) {
             close_pseudo_console()(console);
+            CloseHandle(in_w);
             CloseHandle(out_r);
             return -1;
+        }
+        {
+            // The program reads nothing, but closing the input would close the console
+            // (and stop the program with STATUS_CONTROL_C_EXIT).
+            std::lock_guard<std::mutex> lock(g_children_mutex);
+            g_children[pid].console_input = in_w;
         }
         output = from_handle(out_r);
         return pid;
@@ -725,8 +732,10 @@ void adopt_child(int old_pid, int new_pid) {
     if (!next.process)
         next.process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, FALSE, DWORD(new_pid));
     next.console = old->console;
+    next.console_input = old->console_input;
     next.job = old->job;
     old->console = nullptr;
+    old->console_input = nullptr;
     old->job = nullptr;
 }
 
@@ -741,6 +750,7 @@ void release_child(int pid) {
     }
     // The pseudo-console keeps its output pipe open until it is closed.
     if (child.console) close_pseudo_console()(child.console);
+    if (child.console_input) CloseHandle(child.console_input);
     if (child.job) CloseHandle(child.job);
     if (child.process) CloseHandle(child.process);
 }

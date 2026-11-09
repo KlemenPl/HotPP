@@ -174,11 +174,15 @@ std::unique_ptr<PeImage> PeImage::load(const fs::path& path, const fs::path& pdb
     uint32_t tls_rva, tls_size;
     dir(9, tls_rva, tls_size);
     if (tls_rva && tls_size >= 40) {
-        uint8_t t[8];
-        if (img->read(tls_rva, 8, t)) {
-            uint64_t start_va;
+        uint8_t t[40];
+        if (img->read(tls_rva, sizeof t, t)) {
+            uint64_t start_va, end_va;
+            uint32_t zero_fill;
             std::memcpy(&start_va, t, 8);
+            std::memcpy(&end_va, t + 8, 8);
+            std::memcpy(&zero_fill, t + 32, 4);
             img->tls_start_rva_ = uint32_t(start_va - img->image_base_);
+            img->tls_end_rva_ = uint32_t(end_va - img->image_base_) + zero_fill;
         }
     }
 
@@ -338,7 +342,8 @@ void PeImage::read_pdb(const fs::path& path) {
                 s.name = rb.cstr(r + 14);
                 s.bind = STB_GLOBAL;
                 s.shndx = segment;
-                const bool tls = segment <= sections_.size() && sections_[segment - 1].name.rfind(".tls", 0) == 0;
+                // thread_locals live in the TLS template (the TLS directory's range).
+                const bool tls = tls_start_rva_ && rva >= tls_start_rva_ && rva < tls_end_rva_;
                 if (flags & 2) { // cvpsfFunction
                     s.type = STT_FUNC;
                     s.value = rva;

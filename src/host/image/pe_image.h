@@ -42,7 +42,7 @@ private:
     std::vector<uint8_t> file_;
     std::vector<Section> sections_;
     uint64_t image_base_ = 0;
-    uint32_t tls_start_rva_ = 0; // the TLS template; 0 without TLS
+    uint32_t tls_start_rva_ = 0, tls_end_rva_ = 0; // the TLS template (with its zero fill); 0 without TLS
     std::string pdb_from_image_;
     std::filesystem::path pdb_path_;
     std::vector<ImageSymbol> symbols_;

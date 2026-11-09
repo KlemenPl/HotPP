@@ -173,6 +173,6 @@ if(Python3_Interpreter_FOUND AND TARGET hotpp AND NOT CMAKE_CROSSCOMPILING)
     add_test(NAME install_and_consume
         COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/install/run_install_test.py
             --build-dir ${CMAKE_BINARY_DIR} --consumer ${CMAKE_CURRENT_SOURCE_DIR}/install/consumer
-            --cxx ${CMAKE_CXX_COMPILER} --generator "${CMAKE_GENERATOR}")
+            --cxx ${CMAKE_CXX_COMPILER} --generator "${CMAKE_GENERATOR}" --build-type "${CMAKE_BUILD_TYPE}")
     set_tests_properties(install_and_consume PROPERTIES TIMEOUT 300)
 endif()

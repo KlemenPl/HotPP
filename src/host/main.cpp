@@ -223,6 +223,7 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "restart") == 0) return hotpp::mcp::run_restart(argc - 1, argv + 1);
 
     Options opt;
+    if (const char* v = std::getenv("HOTPP_VERBOSE"); v && *v && *v != '0') opt.host.verbose = true;
     if (!parse_args(argc, argv, opt)) {
         std::fputs(kUsage, stderr);
         return 1;

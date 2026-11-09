@@ -26,6 +26,7 @@ def main() -> int:
     ap.add_argument("--consumer", required=True)
     ap.add_argument("--cxx", required=True)
     ap.add_argument("--generator", default="", help="the CMake generator the build used")
+    ap.add_argument("--build-type", default="", help="the build's CMAKE_BUILD_TYPE (MSVC runtimes must match)")
     args = ap.parse_args()
     exe = ".exe" if os.name == "nt" else ""
     tmp = tempfile.mkdtemp(prefix="hotpp-install-")
@@ -38,7 +39,8 @@ def main() -> int:
                 raise SystemExit(f"error: {f} was not installed")
         build = os.path.join(tmp, "build")
         generator = ["-G", args.generator] if args.generator else []
-        run(["cmake", "-S", args.consumer, "-B", build, *generator, f"-DCMAKE_PREFIX_PATH={prefix}",
+        build_type = [f"-DCMAKE_BUILD_TYPE={args.build_type}"] if args.build_type else []
+        run(["cmake", "-S", args.consumer, "-B", build, *generator, *build_type, f"-DCMAKE_PREFIX_PATH={prefix}",
              f"-DCMAKE_CXX_COMPILER={args.cxx}"])
         run(["cmake", "--build", build])
         out = run([os.path.join(prefix, "bin", "hotpp" + exe), "--", os.path.join(build, "consumer" + exe), "5"])

@@ -30,6 +30,7 @@ struct SecState {
     uint64_t addr = 0;        // loaded: address in the patch region
     bool init_code = false;   // part of a dynamic initializer
     bool needs_shadow = false; // bound_old data an initializer writes: gets a scratch copy
+    bool mixed = false;       // COFF: loaded new, but holds existing variables too (see bind_data)
     uint64_t shadow_addr = 0;
 };
 
@@ -274,6 +275,18 @@ private:
         }
     }
 
+    // A variable that stays where the running program has it must still be one, of
+    // the same kind and size.
+    void check_kept_variable(const ElfObject& ob, const ObjSymbol& s, const IndexEntry& e, bool tls) const {
+        const SymbolKey key = key_of(ob, s);
+        if (e.kind == SymbolKind::Function) throw RestartRequired(key.display() + " changed from a function to a variable");
+        if (tls != (e.kind == SymbolKind::Tls))
+            throw RestartRequired(key.display() + (tls ? " became thread_local" : " is no longer thread_local"));
+        if (e.size && s.size && e.size != s.size)
+            throw RestartRequired("size of " + key.display() + " changed from " + std::to_string(e.size) + " to " +
+                                  std::to_string(s.size) + " bytes");
+    }
+
     // A data section either stays where the running program has it (all its named
     // symbols exist) or is loaded new. Patch compiles use -fdata-sections, so a
     // section normally holds one variable.
@@ -304,21 +317,30 @@ private:
                     for (size_t k : syms)
                         if (!st_[o].existing[k] && tls)
                             throw RestartRequired("new thread_local " + key_of(ob, ob.symbols[k]).display());
-                    throw LinkError("section " + ob.sections[sec].name + " in " + file_of(ob) +
-                                    " mixes existing and new variables");
+                    if (!coff(ob))
+                        throw LinkError("section " + ob.sections[sec].name + " in " + file_of(ob) +
+                                        " mixes existing and new variables");
+                    // MSVC can put several variables in one section even with /Gw. The
+                    // section is loaded new; references to its existing variables go to
+                    // the running program's (COFF code refers to variables by symbol).
+                    // Inside initializers they go to the new copy, which is then their
+                    // scratch copy (§8.6).
+                    for (size_t k : syms)
+                        if (const IndexEntry* e = st_[o].existing[k]) check_kept_variable(ob, ob.symbols[k], *e, false);
+                    ss.mixed = true;
+                    for (size_t k : syms)
+                        if (st_[o].existing[k])
+                            out_.log.push_back("keep  " + key_of(ob, ob.symbols[k]).display() + " at " +
+                                               hex(st_[o].existing[k]->address));
+                    out_.data_kept += existing;
+                    continue;
                 }
                 std::optional<uint64_t> base;
                 for (size_t k : syms) {
                     const ObjSymbol& s = ob.symbols[k];
                     const IndexEntry* e = st_[o].existing[k];
                     const SymbolKey key = key_of(ob, s);
-                    if (e->kind == SymbolKind::Function)
-                        throw RestartRequired(key.display() + " changed from a function to a variable");
-                    if (tls != (e->kind == SymbolKind::Tls))
-                        throw RestartRequired(key.display() + (tls ? " became thread_local" : " is no longer thread_local"));
-                    if (e->size && s.size && e->size != s.size)
-                        throw RestartRequired("size of " + key.display() + " changed from " + std::to_string(e->size) +
-                                              " to " + std::to_string(s.size) + " bytes");
+                    check_kept_variable(ob, s, *e, tls);
                     const uint64_t b = e->address - s.value;
                     if (base && *base != b)
                         throw LinkError("variables in " + ob.sections[sec].name + " are not laid out as in the running program");
@@ -436,6 +458,9 @@ private:
                 const IndexEntry* e = st_[o].existing[k];
                 if (e && e->kind == SymbolKind::Function) return {Target::Absolute, e->address};
             }
+            // An existing variable in a mixed section (see bind_data).
+            if (ss.mixed && !in_init)
+                if (const IndexEntry* e = st_[o].existing[k]) return {Target::Absolute, e->address};
             return section_target(o, s.shndx, s.value, in_init);
         }
         if (s.bind == STB_LOCAL) {

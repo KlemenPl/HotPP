@@ -79,7 +79,7 @@ jobs:
     if: github.server_url == 'https://github.com'
     runs-on: windows-latest
     env:
-      HOTPP_TRACE_SHUTDOWN: "1"
+      HOTPP_VERBOSE: "1" # the linker's decisions show up in failure reports
     strategy:
       fail-fast: false
       matrix:
