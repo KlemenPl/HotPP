@@ -112,7 +112,7 @@ hotpp [options] -- <program> [args...]   start a program under the host
 | `--build "<command>"` | Rebuild command for hot restarts, e.g. `"cmake --build build"`. |
 | `--auto-restart` | When a change can't be patched, rebuild and restart the program (same arguments; same pid on Linux, a new process on Windows). |
 | `--no-auto-reload` | Don't patch saved files until a controller (`hotpp mcp`) asks. |
-| `--capture-output` | Run the program on a pseudo-terminal (Windows: a pseudo-console) and keep its output for `hotpp mcp` (it's still printed). |
+| `--capture-output` | Run the program on a pseudo-terminal (Windows: a pipe, so flush what you print) and keep its output for `hotpp mcp` (it's still printed). |
 | `-v` | Print every module at connect and every symbol decision per patch. |
 | `--endpoint <path>` | Socket (Windows: named pipe) to listen on. |
 

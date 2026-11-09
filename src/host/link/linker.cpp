@@ -342,7 +342,9 @@ private:
                     const SymbolKey key = key_of(ob, s);
                     check_kept_variable(ob, s, *e, tls);
                     const uint64_t b = e->address - s.value;
-                    if (base && *base != b)
+                    // COFF code refers to each variable by its symbol, which resolves to
+                    // the variable itself (resolve_symbol): the layout needn't match.
+                    if (base && *base != b && !coff(ob))
                         throw LinkError("variables in " + ob.sections[sec].name + " are not laid out as in the running program");
                     base = b;
                     out_.log.push_back("keep  " + key.display() + (tls ? " at TLS offset " : " at ") + hex(e->address));
@@ -458,9 +460,13 @@ private:
                 const IndexEntry* e = st_[o].existing[k];
                 if (e && e->kind == SymbolKind::Function) return {Target::Absolute, e->address};
             }
-            // An existing variable in a mixed section (see bind_data).
-            if (ss.mixed && !in_init)
-                if (const IndexEntry* e = st_[o].existing[k]) return {Target::Absolute, e->address};
+            // An existing variable in a mixed section (see bind_data), or any existing
+            // COFF variable: where the program has it, whatever its section's layout.
+            if ((ss.mixed || (coff(ob) && ss.bound_old)) && !(in_init && ss.needs_shadow) && ss.kind != SecKind::Text)
+                if (const IndexEntry* e = st_[o].existing[k]) {
+                    if (e->kind == SymbolKind::Tls) return {Target::Tls, e->address};
+                    if (!(ss.mixed && in_init)) return {Target::Absolute, e->address};
+                }
             return section_target(o, s.shndx, s.value, in_init);
         }
         if (s.bind == STB_LOCAL) {

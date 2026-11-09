@@ -9,7 +9,7 @@ Windows: programs built with MSVC or clang-cl are hot reloaded like Linux ones.
 - Patching reads COFF objects and the program's PDB. Functions are redirected, globals, statics, function-local statics and existing `thread_local`s keep their state, new globals are initialized, and exceptions pass between old and new code.
 - Restart-required checks and layout warnings work as on Linux. With MSVC, changing a variable's type also needs a restart, since its decorated name changes.
 - Hot restart rebuilds and continues the program as a new process (Windows has no `exec`); the host follows it. The running executable is moved aside for the build.
-- Hosts listen on named pipes for the user only. `hotpp mcp` launches programs in job objects and captures their output through a pseudo-console.
+- Hosts listen on named pipes for the user only. `hotpp mcp` launches programs in job objects and captures their output through a pipe (the program's C runtime then buffers it, so programs should flush; `HOTPP_CONPTY=1` tries a pseudo-console instead).
 - Not yet on Windows: patching DLLs, debugging patched code, restarting the host while programs run.
 
 ### Everyone

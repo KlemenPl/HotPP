@@ -719,16 +719,15 @@ The patch-site scheme is otherwise the Linux one (§8.3): a `jmp rel32` in the p
 **Hot restart.** There is no `exec`:
 1. The agent starts the rebuilt executable suspended and sends `Restarting{pid}`.
 2. It resumes the new process and ends itself.
-3. The host follows the new pid: in run mode, for controllers and for auto-reload settings. The new process takes over the pseudo-console and job.
+3. The host follows the new pid: in run mode, for controllers and for auto-reload settings. The new process takes over the job (and pseudo-console, if any).
 
 Windows locks a running executable, so the host renames it aside before the build.
 
-**Processes.** Children get explicit inherited-handle lists. Launched hosts run in a job object, so `hotpp mcp` can kill them with everything they started. Output is captured through a pseudo-console. `hotpp restart` replaces `kill -USR1`.
+**Processes.** Children get explicit inherited-handle lists. Launched hosts run in a job object, so `hotpp mcp` can kill them with everything they started. Output is captured through a pipe: a pseudo-console (which would keep the program's output line-buffered) delivered nothing in CI or under Wine, so it's only tried with `HOTPP_CONPTY=1`. `hotpp restart` replaces `kill -USR1`.
 
 **Testing without Windows.** `cmake/toolchains/clang-cl-xwin.cmake` cross-compiles with clang-cl against the MSVC runtime and SDK from xwin, and the tests run under Wine (CI job `wine`). Wine needs a few workarounds:
 - Wine's `msvcp140.dll` doesn't match the current STL headers (`condition_variable` never wakes), so the static runtime is used.
 - Wine neither redirects a native Linux program's standard handles nor reports its pid or exit status. The host runs a cross build's native compiler through `/bin/sh`, which writes its output and status to files.
-- Wine's pseudo-console doesn't capture output, so pipes are used under Wine.
 
 The `windows` CI job builds with real MSVC and clang-cl on GitHub.
 

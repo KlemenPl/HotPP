@@ -658,8 +658,10 @@ int spawn_child_pty(const std::vector<std::string>& args, Handle& output, std::s
         return -1;
     }
     HPCON console = nullptr;
-    // Wine's pseudo-console doesn't capture the program's output: pipes there.
-    auto create = under_wine() ? nullptr : create_pseudo_console();
+    // Pipes by default: the pseudo-console delivered no output on Windows Server 2025
+    // (CI) nor under Wine. HOTPP_CONPTY=1 tries it (line-buffered program output).
+    const char* conpty = std::getenv("HOTPP_CONPTY");
+    auto create = conpty && *conpty == '1' && !under_wine() ? create_pseudo_console() : nullptr;
     if (create && SUCCEEDED(create(COORD{200, 50}, in_r, out_w, 0, &console))) {
         CloseHandle(in_r);
         CloseHandle(out_w);
