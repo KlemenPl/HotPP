@@ -29,8 +29,13 @@ def main() -> int:
         # The programs' per-frame lines say nothing; keep the rest.
         noise = r"^(frame \d+|value .*|\s+\[\s*\d+\] .*|  (exe|compile commands|modules|patch regions).*|\s+[0-9a-f]{16}-[0-9a-f]{16} .*)$"
         lines = [l for l in out.splitlines() if l.strip() and not re.match(noise, l)]
-        tail = "\n".join(lines[-80:])[-6000:]
-        print(f"::error title={escape(case.get('name', 'test'))} failed::{escape(tail)}")
+        # GitHub shows about 4 KB of an annotation: the failure lines first, then
+        # as much of the end of the output as still fits.
+        key = [l for l in lines if re.match(r"^(FAIL|error:|Traceback)", l)][-5:]
+        head = "\n".join(key)[-1500:]
+        tail = "\n".join(lines[-80:])[-(3800 - len(head)):]
+        text = (head + "\n----- end of output:\n" + tail) if head else tail
+        print(f"::error title={escape(case.get('name', 'test'))} failed::{escape(text)}")
     print(f"{failed} failed test(s) reported")
     return 1
 

@@ -84,9 +84,10 @@ void register_hook(HookKind kind, void (*fn)());
 #endif
 // Stores the hook so the registering initializer writes a variable of its own: a
 // patch runs a file's initializers only when they set up new variables
-// (docs/DESIGN.md §8.6), and an empty registrar would be optimized away.
+// (docs/DESIGN.md §8.6), and an empty registrar would be optimized away. The store
+// is volatile: MSVC ignores [[gnu::used]] and would drop a store nothing reads.
 struct HookRegistrar {
-    void (*fn)();
+    void (*volatile fn)();
     HookRegistrar(HookKind kind, void (*f)()) : fn(f) {
 #if !defined(HOTPP_DISABLE)
         register_hook(kind, f);
