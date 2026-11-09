@@ -171,6 +171,8 @@ HotPP rejects these and leaves the program untouched (with `--auto-restart`, it 
 - a new `thread_local`
 - a new use of a shared-library variable the program didn't use before (GCC)
 
+With **MSVC**, a lambda changed by a patch is a new type: MSVC names lambdas by a hash that changes with their file. New calls get the new lambda, but a `std::function` (or other copy) made before the patch keeps the old one. clang-cl doesn't have this limit.
+
 It **warns** when a struct's layout changes (a header gains a member): objects created before the patch keep the old layout. It also warns when a patch replaces a function that is running, such as `main()` or a loop that calls `sync_point()`: the running call keeps its old code until it returns. Put per-frame code in functions the loop calls. When a file gains a dynamically initialized global, that file's other initializers re-run into scratch copies, so their side effects repeat.
 
 ## Tips

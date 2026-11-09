@@ -27,7 +27,8 @@ def main() -> int:
         failed += 1
         out = case.findtext("system-out") or ""
         # The programs' per-frame lines say nothing; keep the rest.
-        lines = [l for l in out.splitlines() if l.strip() and not re.match(r"^(frame \d+|value .*)$", l)]
+        noise = r"^(frame \d+|value .*|\s+\[\s*\d+\] .*|  (exe|compile commands|modules|patch regions).*|\s+[0-9a-f]{16}-[0-9a-f]{16} .*)$"
+        lines = [l for l in out.splitlines() if l.strip() and not re.match(noise, l)]
         tail = "\n".join(lines[-80:])[-6000:]
         print(f"::error title={escape(case.get('name', 'test'))} failed::{escape(tail)}")
     print(f"{failed} failed test(s) reported")

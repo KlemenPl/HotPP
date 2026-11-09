@@ -278,6 +278,7 @@ private:
 
 struct Child {
     HANDLE process = nullptr;
+    bool group = false;             // created with CREATE_NEW_PROCESS_GROUP
     HANDLE console_input = nullptr; // the pseudo-console's input: closing it ends the console
     HANDLE job = nullptr;   // new_process_group: the job holding it and what it starts
     HPCON console = nullptr; // spawn_child_pty: closed once the process exits
@@ -441,6 +442,7 @@ int start(const std::vector<std::string>& args, const SpawnOptions& opt, HPCON c
     if (started) *started = true;
     Child child;
     child.process = pi.hProcess;
+    child.group = opt.new_process_group;
     child.console = console;
     if (opt.new_process_group) {
         // A job, so the process and everything it starts can be killed together.
@@ -758,7 +760,15 @@ void release_child(int pid) {
 }
 
 void stop_process(int pid, bool force) {
-    if (!force && GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, DWORD(pid))) return;
+    // Ctrl+Break only to a process group of its own: for any other pid it reaches
+    // every process on the console, ours and our parent's included.
+    bool group = false;
+    {
+        std::lock_guard<std::mutex> lock(g_children_mutex);
+        auto it = g_children.find(pid);
+        group = it != g_children.end() && it->second.group;
+    }
+    if (!force && group && GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, DWORD(pid))) return;
     HANDLE h = child_process(pid);
     HANDLE opened = h ? nullptr : OpenProcess(PROCESS_TERMINATE, FALSE, DWORD(pid));
     if (h || opened) TerminateProcess(h ? h : opened, 1);

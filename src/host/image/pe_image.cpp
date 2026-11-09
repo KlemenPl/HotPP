@@ -306,7 +306,9 @@ void PeImage::read_pdb(const fs::path& path) {
                 s.size = n.length;
             } else if (n.tls) {
                 s.type = STT_TLS;
-                s.value = tls_start_rva_ && rva >= tls_start_rva_ ? rva - tls_start_rva_ : rva;
+                // Within the TLS template: the offset from its start. Otherwise (MSVC's
+                // records of static thread_locals) the record's offset already is one.
+                s.value = tls_start_rva_ && rva >= tls_start_rva_ && rva < tls_end_rva_ ? rva - tls_start_rva_ : n.offset;
                 s.size = codeview::type_size(tpi, n.type);
             } else {
                 s.type = STT_OBJECT;
