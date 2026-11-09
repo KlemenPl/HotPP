@@ -618,6 +618,19 @@ The program checks its invariants every frame (state never resets, old and new r
 | 4 | Compiler arguments with response files (`@file`). | Pass through unchanged today; expand them in the compiler driver if the output or depfile flags hide inside one. |
 | 5 | Programs using LLVM's libunwind instead of libgcc. | Per-FDE registration via `__unw_add_dynamic_fde` if needed. |
 
+### Windows spike (W0, 2026-11-09)
+Four questions decided whether the Windows port (MSVC and clang-cl) can follow the Linux design. They were checked with throwaway programs, built with clang-cl 19 and lld-link against the MSVC CRT and SDK (from xwin), and run under Wine 10:
+
+1. **Matching static symbols between the PDB and a patch `.obj`.** The PDB's module streams name statics *undecorated* (`over`, `` `anonymous namespace'::helper ``, a local static `calls` nested in its function's scope). The object uses decorated COFF names (`?over@@YAHH@Z`, `?over@@YAHN@Z`) or plain C names (`counter`). Overloads share a name. The patch object's `.debug$S` maps each COFF symbol to its CodeView name and type through relocations. Matching on (compiland, enclosing function, name) with the printed type signature as a tie-breaker therefore identifies every static. **Feasible.**
+2. **Patch-site room.** With `/hotpatch` and `/FUNCTIONPADMIN`, lld-link leaves at least 16 `int3` bytes before each function. Every function starts with an instruction of at least 2 bytes; clang emits `66 90` where it would otherwise be 1 byte. The Linux site scheme works unchanged: a jump in the padding, then a 2-byte short jump at the entry. **Yes for clang-cl/lld-link; cl/link still to be checked on Windows CI.**
+3. **Exceptions from patch code.** Code in memory *above* the executable throws, unwinds and is caught in the executable when:
+   - its `.pdata`/`.xdata` are registered with `RtlAddFunctionTable` using the executable's image base as the base for every RVA
+   - a copy of the `ThrowInfo` lives in that memory, with RVAs relative to the same base
+   - the throw goes through a shim that passes that base to `RaiseException`, because `_CxxThrowException` derives it with `RtlPcToFileHeader`, which fails for non-image memory
+
+   **Works under Wine; to be confirmed on Windows.**
+4. **Compiling from a host running under Wine.** A Windows program under Wine can `CreateProcess` the native Linux `clang-cl` (as `/usr/…` or `Z:\usr\…`), so the cross-built host can run the build's own compile commands. **Yes.**
+
 ---
 
 ## 14. MCP server (`hotpp mcp`)
