@@ -275,7 +275,9 @@ std::vector<std::string> patch_compile_arguments(const CompileCommand& cmd, cons
         // variable (see below).
         // Forward slashes: cl and clang-cl accept them, and a native clang-cl run from
         // a host under Wine needs them.
-        std::vector<std::string> extra = {"/Z7", "/Gy", "/Gw", "/hotpatch", "/Fo" + output.generic_string()};
+        // /hotpatch: clang-cl only; cl takes it on x86 only (x64 code is hot-patchable as is).
+        std::vector<std::string> extra = {"/Z7", "/Gy", "/Gw", "/Fo" + output.generic_string()};
+        if (driver == Driver::ClangCl) extra.push_back("/hotpatch");
         if (!depfile.empty()) {
             if (driver == Driver::Cl) {
                 extra.insert(extra.end(), {"/sourceDependencies", depfile.generic_string()});

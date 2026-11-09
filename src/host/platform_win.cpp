@@ -75,12 +75,16 @@ public:
     PipeStream(HANDLE h, bool server) : h_(h), server_(server) {
         read_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         write_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        stop_read_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     }
     ~PipeStream() override {
         if (server_) DisconnectNamedPipe(h_);
         CloseHandle(h_);
         CloseHandle(read_event_);
         CloseHandle(write_event_);
+        CloseHandle(stop_);
+        CloseHandle(stop_read_);
     }
 
     bool send(const void* data, size_t size) override {
@@ -109,13 +113,15 @@ public:
         return true;
     }
 
+    // The stop events end a wait that is under way or starts later; cancelling the
+    // I/O alone would miss a read issued just after.
     void shutdown() override {
         closed_ = true;
-        CancelIoEx(h_, nullptr);
+        SetEvent(stop_);
     }
     void shutdown_read() override {
         read_closed_ = true;
-        CancelIoEx(h_, &read_ov_);
+        SetEvent(stop_read_);
     }
 
     bool peer_is_same_user() const override {
@@ -142,12 +148,19 @@ private:
         ResetEvent(ov.hEvent);
         const BOOL ok = reading ? ReadFile(h_, buf, size, nullptr, &ov) : WriteFile(h_, buf, size, nullptr, &ov);
         if (!ok && GetLastError() != ERROR_IO_PENDING) return false;
-        return GetOverlappedResult(h_, &ov, &done, TRUE) != 0;
+        HANDLE waits[3] = {ov.hEvent, stop_, stop_read_};
+        const DWORD w = WaitForMultipleObjects(reading ? 3 : 2, waits, FALSE, INFINITE);
+        if (w != WAIT_OBJECT_0) {
+            CancelIoEx(h_, &ov);
+            GetOverlappedResult(h_, &ov, &done, TRUE); // the I/O must end before `ov` goes away
+            return false;
+        }
+        return GetOverlappedResult(h_, &ov, &done, FALSE) != 0;
     }
 
     HANDLE h_;
     bool server_;
-    HANDLE read_event_, write_event_;
+    HANDLE read_event_, write_event_, stop_, stop_read_;
     OVERLAPPED read_ov_{}, write_ov_{};
     std::mutex read_mutex_, write_mutex_;
     std::atomic<bool> closed_{false}, read_closed_{false};

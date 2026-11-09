@@ -5,6 +5,7 @@ signing in to view logs:
 
     ctest --test-dir build --output-junit junit.xml || python3 tools/ci_report.py build/junit.xml
 """
+import re
 import sys
 import xml.etree.ElementTree as ET
 
@@ -25,7 +26,8 @@ def main() -> int:
             continue
         failed += 1
         out = case.findtext("system-out") or ""
-        lines = [l for l in out.splitlines() if l.strip()]
+        # The programs' per-frame lines say nothing; keep the rest.
+        lines = [l for l in out.splitlines() if l.strip() and not re.match(r"^(frame \d+|value .*)$", l)]
         tail = "\n".join(lines[-80:])[-6000:]
         print(f"::error title={escape(case.get('name', 'test'))} failed::{escape(tail)}")
     print(f"{failed} failed test(s) reported")

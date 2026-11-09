@@ -45,11 +45,15 @@ function(hotpp_enable target)
         # MSVC and clang-cl (docs/DESIGN.md §4):
         #   /Z7          debug info in the objects; the linker writes a full PDB
         #   /Gy          each function in its own section (needed for /FUNCTIONPADMIN)
-        #   /hotpatch    every function starts with an instruction of 2+ bytes
+        #   /hotpatch    (clang-cl) every function starts with an instruction of 2+ bytes;
+        #                MSVC does that on x64 anyway and takes the flag on x86 only
         #   /FUNCTIONPADMIN  padding before every function for the patch-site jump
         #   /OPT:NOREF /OPT:NOICF  keep "unused" and identical functions separate
         #   /INCREMENTAL:NO  no incremental-link thunks in front of functions
-        target_compile_options(${target} PRIVATE /Z7 /Gy /hotpatch)
+        target_compile_options(${target} PRIVATE /Z7 /Gy)
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+            target_compile_options(${target} PRIVATE /hotpatch)
+        endif()
         if(type STREQUAL "EXECUTABLE" OR type MATCHES "SHARED_LIBRARY|MODULE_LIBRARY")
             target_link_options(${target} PRIVATE /DEBUG:FULL /FUNCTIONPADMIN /OPT:NOREF /OPT:NOICF /INCREMENTAL:NO)
         endif()

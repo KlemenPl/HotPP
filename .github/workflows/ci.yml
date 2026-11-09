@@ -78,6 +78,8 @@ jobs:
   windows:
     if: github.server_url == 'https://github.com'
     runs-on: windows-latest
+    env:
+      HOTPP_TRACE_SHUTDOWN: "1"
     strategy:
       fail-fast: false
       matrix:

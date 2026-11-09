@@ -25,12 +25,19 @@ public:
         port_ = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 1);
     }
     ~DirectoryWatcher() override {
-        for (auto& d : dirs_) {
-            CancelIoEx(d->handle, &d->ov);
-            DWORD ignored;
-            GetOverlappedResult(d->handle, &d->ov, &ignored, TRUE);
-            CloseHandle(d->handle);
+        // Cancel every pending read and wait (boundedly) for the cancellations to come
+        // through the port: until then the system may still write to the buffers.
+        size_t pending = 0;
+        for (auto& d : dirs_)
+            if (CancelIoEx(d->handle, &d->ov) || GetLastError() != ERROR_NOT_FOUND) ++pending;
+        for (size_t seen = 0; seen < pending;) {
+            DWORD bytes = 0;
+            ULONG_PTR key = 0;
+            OVERLAPPED* ov = nullptr;
+            if (!GetQueuedCompletionStatus(port_, &bytes, &key, &ov, 2000) && !ov) break; // timed out
+            ++seen;
         }
+        for (auto& d : dirs_) CloseHandle(d->handle);
         if (port_) CloseHandle(port_);
     }
 

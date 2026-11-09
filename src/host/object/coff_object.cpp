@@ -417,6 +417,24 @@ std::unique_ptr<ElfObject> ElfObject::from_coff(std::vector<uint8_t> bytes, std:
             std::memcpy(&len, s.data + pos + 4, 4);
             if (len > s.size - pos - 8) break;
             if (sub == codeview::kDebugSSymbols) {
+                // The compiland's source, as the PDB records it (MSVC objects have no
+                // .file symbol): S_BUILDINFO names an LF_BUILDINFO record.
+                for (size_t r = pos + 8; r + 8 <= pos + 8 + len;) {
+                    uint16_t rlen, kind;
+                    std::memcpy(&rlen, s.data + r, 2);
+                    std::memcpy(&kind, s.data + r + 2, 2);
+                    if (rlen < 2) break;
+                    if (kind == codeview::S_BUILDINFO && rlen >= 6) {
+                        uint32_t id;
+                        std::memcpy(&id, s.data + r + 4, 4);
+                        try {
+                            const codeview::BuildInfo bi = codeview::build_info(types, id);
+                            if (!bi.source.empty()) obj->source_name = basename(bi.source);
+                        } catch (const codeview::CvError&) {
+                        }
+                    }
+                    r += 2 + size_t(rlen);
+                }
                 try {
                     codeview::collect_symbols(s.data + pos + 8, len, pos + 8, types, &types, named);
                 } catch (const codeview::CvError&) {

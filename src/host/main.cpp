@@ -96,6 +96,14 @@ bool parse_args(int argc, char** argv, Options& o) {
     return true;
 }
 
+// $HOTPP_TRACE_SHUTDOWN: print each step of shutting down, to find one that hangs.
+void trace(const char* step) {
+    static const bool on = std::getenv("HOTPP_TRACE_SHUTDOWN") != nullptr;
+    if (!on) return;
+    std::fprintf(stderr, "[hotpp] shutdown: %s\n", step);
+    std::fflush(stderr);
+}
+
 // Set by Ctrl+C / SIGTERM: shut down cleanly (remove the endpoint, end sessions).
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_terminate{false}; // a Terminate request (not Ctrl+C): pass it on to the program
@@ -196,13 +204,16 @@ void handle_client(std::unique_ptr<host::Stream> stream, Server* server) {
 // Stops accepting, ends every open connection and waits for all connection threads.
 // Controllers only lose their receiving side, so replies in progress still go out.
 void shut_down(host::Listener& listener, std::thread& acceptor, Server& server) {
+    trace("closing the listener");
     listener.close();
     if (acceptor.joinable()) acceptor.join();
+    trace("ending connections");
     {
         std::lock_guard<std::mutex> lock(server.mutex);
         for (auto& [s, controller] : server.open) controller ? s->shutdown_read() : s->shutdown();
     }
     for (std::thread& t : server.threads) t.join();
+    trace("connections ended");
 }
 
 } // namespace
@@ -400,8 +411,11 @@ int main(int argc, char** argv) {
         }
         shut_down(*listener, acceptor, server);
         wake.set();
+        trace("waiting for the output reader");
         if (output.joinable()) output.join();
+        trace("waiting for helpers");
         join_helpers();
+        trace("done");
         if (code != 0) return code;
         if (server.sessions_ended == 0) {
             std::fprintf(stderr, "[hotpp] error: no agent connected\n");

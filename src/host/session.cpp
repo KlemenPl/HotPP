@@ -143,7 +143,17 @@ constexpr size_t kOutputHead = 48 * 1024, kOutputTail = 8 * 1024; // compiler ou
 Session::Session(std::unique_ptr<Stream> stream, HostOptions options, EventLog& events, Registry& registry)
     : stream_(std::move(stream)), options_(std::move(options)), events_(events), registry_(registry) {}
 
+namespace {
+void trace_shutdown(const char* step) {
+    static const bool on = std::getenv("HOTPP_TRACE_SHUTDOWN") != nullptr;
+    if (!on) return;
+    std::fprintf(stderr, "[hotpp] session shutdown: %s\n", step);
+    std::fflush(stderr);
+}
+} // namespace
+
 Session::~Session() {
+    trace_shutdown("start");
     // Executables moved aside for rebuilds (Windows); the old process is gone by now
     // or soon, so this may fail and leave them for later.
     for (const fs::path& p : old_executables_) {
@@ -152,8 +162,11 @@ Session::~Session() {
     }
     stop_ = true;
     scan_cv_.notify_all();
+    trace_shutdown("joining the watcher");
     if (watch_thread_.joinable()) watch_thread_.join();
+    trace_shutdown("joining the dependency scan");
     if (scan_thread_.joinable()) scan_thread_.join();
+    trace_shutdown("threads joined");
     if (!patch_dir_.empty()) {
         // While the process lives, keep the state file so a new host can resume
         // (docs/DESIGN.md §3.3); the compiled objects can go.
