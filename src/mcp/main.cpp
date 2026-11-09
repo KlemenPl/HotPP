@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -153,6 +154,64 @@ int run(int argc, char** argv) {
     g_wake = nullptr;
     host::close_handle(out);
     return exit_code;
+}
+
+namespace {
+constexpr const char* kRestartUsage =
+    "usage: hotpp restart [--pid N] [--endpoint E]... [--no-rebuild]\n"
+    "\n"
+    "Rebuilds (with the host's --build command) and restarts every program running\n"
+    "under a HotPP host of this user, or only process N.\n";
+} // namespace
+
+int run_restart(int argc, char** argv) {
+    HostsOptions options;
+    options.allow_launch = false;
+    int64_t only = 0;
+    bool rebuild = true;
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--pid" && i + 1 < argc) {
+            only = std::atoll(argv[++i]);
+        } else if (a == "--endpoint" && i + 1 < argc) {
+            options.endpoints.push_back(argv[++i]);
+        } else if (a == "--no-rebuild") {
+            rebuild = false;
+        } else {
+            std::fputs(kRestartUsage, a == "--help" || a == "-h" ? stdout : stderr);
+            return a == "--help" || a == "-h" ? 0 : 1;
+        }
+    }
+    Hosts hosts(options);
+    int failures = 0, restarted = 0;
+    for (const Hosts::Program& p : hosts.programs()) {
+        if (p.exited || (only && int64_t(p.pid) != only)) continue;
+        json::Value params = json::Value::object();
+        params.set("pid", int64_t(p.pid)).set("rebuild", rebuild).set("timeout_ms", int64_t(300000));
+        std::printf("restarting pid %u...\n", unsigned(p.pid));
+        std::fflush(stdout);
+        try {
+            const json::Value r = p.host->request("restart", params, std::chrono::milliseconds(310000),
+                                                  [](const std::string& line) { std::printf("  %s\n", line.c_str()); });
+            const json::Value* outcome = r.get("outcome");
+            const json::Value* error = r.get("error");
+            const std::string o = outcome && outcome->is_string() ? outcome->as_string() : "?";
+            std::printf("pid %u: %s%s\n", unsigned(p.pid), o.c_str(),
+                        error && error->is_string() ? (": " + error->as_string()).c_str() : "");
+            if (o == "restarted") ++restarted;
+            else ++failures;
+        } catch (const std::exception& e) {
+            std::printf("pid %u: %s\n", unsigned(p.pid), e.what());
+            ++failures;
+        }
+    }
+    if (!restarted && !failures) {
+        std::fprintf(stderr, only ? "no program with pid %lld is running under a HotPP host\n"
+                                  : "no program is running under a HotPP host\n",
+                     (long long)only);
+        return 1;
+    }
+    return failures ? 1 : 0;
 }
 
 } // namespace hotpp::mcp

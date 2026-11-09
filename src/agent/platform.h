@@ -82,8 +82,10 @@ void ipc_close(Connection* c);
 // The command line the process was started with.
 std::vector<std::string> command_line();
 // Hot restart: runs the (rebuilt) executable at `path` with `argv` in place of this
-// process. Returns only on failure, with the reason.
-std::string exec_self(const std::string& path, const std::vector<std::string>& argv);
+// process. `announce` gets the pid the program continues as (this one on Linux,
+// which execs; a new process on Windows) just before this process ends. Returns
+// only on failure, with the reason.
+std::string exec_self(const std::string& path, const std::vector<std::string>& argv, void (*announce)(uint32_t pid));
 
 // Starts `program` (searched on PATH) without waiting for it.
 bool spawn_detached(const std::string& program, const std::vector<std::string>& args);

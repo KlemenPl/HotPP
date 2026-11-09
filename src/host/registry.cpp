@@ -165,10 +165,45 @@ std::vector<std::shared_ptr<SessionHandle>> Registry::list() const {
 
 std::shared_ptr<SessionHandle> Registry::find(uint32_t pid) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::shared_ptr<SessionHandle> best;
-    for (const auto& s : sessions_)
-        if (s->pid() == pid && (!best || s->session() > best->session())) best = s;
-    return best;
+    for (int hops = 0; hops < 64; ++hops) {
+        std::shared_ptr<SessionHandle> best;
+        for (const auto& s : sessions_)
+            if (s->pid() == pid && (!best || s->session() > best->session())) best = s;
+        auto next = successors_.find(pid);
+        if (next == successors_.end()) return best;
+        // Restarted as another process: its session, once it has one.
+        bool newer = false;
+        for (const auto& s : sessions_) newer |= s->pid() == next->second;
+        if (!newer) return best;
+        pid = next->second;
+    }
+    return nullptr;
+}
+
+void Registry::expect_restart(uint32_t pid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    restarting_.insert(pid);
+}
+
+void Registry::note_restart(uint32_t old_pid, uint32_t new_pid) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (old_pid == new_pid) return;
+        successors_[old_pid] = new_pid;
+        restarting_.erase(old_pid);
+        // A controller's auto-reload setting goes with the program.
+        auto it = overrides_.find(old_pid);
+        if (it != overrides_.end()) overrides_[new_pid] = it->second;
+        ++generation_;
+    }
+    cv_.notify_all();
+}
+
+uint32_t Registry::successor(uint32_t pid, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait_for(lock, timeout, [&] { return successors_.count(pid) || !restarting_.count(pid); });
+    auto it = successors_.find(pid);
+    return it == successors_.end() ? 0 : it->second;
 }
 
 bool Registry::wait(const std::function<bool()>& ready, std::chrono::milliseconds timeout,

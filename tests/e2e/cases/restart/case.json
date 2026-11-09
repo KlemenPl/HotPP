@@ -12,7 +12,7 @@
         "game.cpp": "v2/game.cpp"
       },
       "expect": [
-        "restart required: size of counter",
+        "restart required: (size|type) of counter",
         "^\\[hotpp\\] rebuilt in",
         "^\\[hotpp\\] restarting",
         "^\\[hotpp\\] agent connected",

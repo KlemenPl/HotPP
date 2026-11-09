@@ -144,6 +144,12 @@ Session::Session(std::unique_ptr<Stream> stream, HostOptions options, EventLog& 
     : stream_(std::move(stream)), options_(std::move(options)), events_(events), registry_(registry) {}
 
 Session::~Session() {
+    // Executables moved aside for rebuilds (Windows); the old process is gone by now
+    // or soon, so this may fail and leave them for later.
+    for (const fs::path& p : old_executables_) {
+        std::error_code ec;
+        fs::remove(p, ec);
+    }
     stop_ = true;
     scan_cv_.notify_all();
     if (watch_thread_.joinable()) watch_thread_.join();
@@ -313,6 +319,13 @@ Session::Outcome Session::run(const std::vector<uint8_t>& hello_payload) {
                     std::lock_guard<std::mutex> lock(reply_mutex_);
                     module_changes_.push_back(std::move(change));
                     has_module_changes_ = true;
+                }
+            } else if (h.type == MsgType::Restarting) {
+                Restarting next;
+                if (decode(mr, next) && next.pid && next.pid != hello_.pid) {
+                    host::adopt_child(int(hello_.pid), int(next.pid));
+                    registry_.note_restart(hello_.pid, next.pid);
+                    say("the program continues as pid " + std::to_string(next.pid));
                 }
             } else if (h.type == MsgType::ActiveFrames) {
                 ActiveFrames frames;
@@ -1170,7 +1183,8 @@ std::shared_ptr<PatchReport> Session::handle_changes(const std::vector<fs::path>
 }
 
 // Rebuild (if asked and a build command is set), then have the agent re-exec the
-// program. The process keeps its pid and reconnects as a new session; this one ends.
+// program. It reconnects as a new session; this one ends. On Linux the process
+// keeps its pid; on Windows it continues as a new process (Restarting message).
 Session::RestartResult Session::hot_restart(const std::string& reason, bool rebuild) {
     RestartResult r;
     handle_->update([](SessionInfo& i) { i.state = "restarting"; });
@@ -1178,7 +1192,22 @@ Session::RestartResult Session::hot_restart(const std::string& reason, bool rebu
         say("rebuilding (" + reason + "): " + options_.build_command);
         const auto started = Clock::now();
         std::string output, error;
+        // Windows: a running executable can't be overwritten, only renamed. Moved
+        // aside, the build writes a fresh one, which the restart runs.
+        fs::path aside;
+        if (hello_.platform == Platform::Windows) {
+            aside = fs::path(hello_.exe);
+            aside += ".hotpp-old-" + std::to_string(hello_.pid) + "-" + std::to_string(++restarts_);
+            std::error_code ec;
+            fs::rename(hello_.exe, aside, ec);
+            if (ec) aside.clear();
+        }
         const int rc = run_capture(shell_command(options_.build_command), {}, output, error);
+        if (!aside.empty()) {
+            std::error_code ec;
+            if (rc != 0 || !fs::exists(hello_.exe, ec)) fs::rename(aside, hello_.exe, ec); // keep the program runnable
+            else old_executables_.push_back(aside);
+        }
         r.output = cap_output(strip_ansi(output), kOutputHead, kOutputTail);
         if (rc != 0) {
             std::fputs(output.c_str(), stdout);
@@ -1190,6 +1219,8 @@ Session::RestartResult Session::hot_restart(const std::string& reason, bool rebu
         }
         say("rebuilt in " + ms_since(started));
     }
+    // Windows has no exec: the program continues as a new process (Restarting).
+    if (hello_.platform == Platform::Windows) registry_.expect_restart(hello_.pid);
     Writer w;
     if (!send(MsgType::Restart, w)) {
         r.outcome = "disconnected";

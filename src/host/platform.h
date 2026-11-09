@@ -117,6 +117,12 @@ int spawn_child_pty(const std::vector<std::string>& argv, Handle& output, std::s
 // number if killed by a signal). `on_signal` runs whenever a stop request
 // interrupts the wait, e.g. to forward it.
 int wait_child(int pid, const std::function<void()>& on_signal);
+// Windows: a hot restart continued child `old_pid` as process `new_pid`, which
+// takes over its pseudo-console and job; wait_child() then works for it. Linux
+// keeps the pid: no-op.
+void adopt_child(int old_pid, int new_pid);
+// Frees what a child waited for leaves behind (Windows: its pseudo-console).
+void release_child(int pid);
 // Asks a child to stop (SIGTERM; Ctrl+Break on Windows), or kills it (`force`).
 void stop_process(int pid, bool force);
 // Kills a child started with new_process_group and everything in its group.

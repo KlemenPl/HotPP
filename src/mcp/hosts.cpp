@@ -405,6 +405,7 @@ std::shared_ptr<Launched> Hosts::launch(const LaunchSpec& spec, std::shared_ptr<
     });
     l->reaper = std::thread([raw, pid] {
         const int status = host::wait_child(pid, {});
+        host::release_child(pid);
         std::lock_guard<std::mutex> lock(raw->mutex);
         raw->status = status;
         raw->done = true;

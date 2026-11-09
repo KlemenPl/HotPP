@@ -164,6 +164,8 @@ private:
     std::vector<proto::ModulesChanged> module_changes_; // for the watcher thread
     std::atomic<bool> has_module_changes_{false};
     bool disconnected_ = false;
+    std::vector<std::filesystem::path> old_executables_; // moved aside for rebuilds (Windows)
+    int restarts_ = 0;
 };
 
 } // namespace hotpp::host

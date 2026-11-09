@@ -271,6 +271,7 @@ struct Child {
 
 std::mutex g_children_mutex;
 std::map<int, Child> g_children;
+std::map<int, Child> g_exited; // waited for; their console and job wait for release_child()
 std::atomic<int> g_stop_requests{0}; // counts console stop events, for wait_child
 
 // Values the child inherits: duplicates of ours if they aren't inheritable.
@@ -340,7 +341,11 @@ ClosePseudoConsoleFn close_pseudo_console() {
     return fn;
 }
 
-int start(const std::vector<std::string>& args, const SpawnOptions& opt, HPCON console, std::string& error) {
+// Returns the pid, or -1 (with `error` set). `started` tells success apart from a
+// pid that isn't one: Wine reports no usable pid for a native Linux program.
+int start(const std::vector<std::string>& args, const SpawnOptions& opt, HPCON console, std::string& error,
+          bool* started = nullptr) {
+    if (started) *started = false;
     if (args.empty()) {
         error = "no program to start";
         return -1;
@@ -348,10 +353,19 @@ int start(const std::vector<std::string>& args, const SpawnOptions& opt, HPCON c
     Inherit inherit;
     HANDLE stdio[3] = {nullptr, nullptr, nullptr};
     std::vector<HANDLE> extra;
+    // Extra handles keep their value (the child is told it, see handle_argument): made
+    // inheritable just for this call. The handle list keeps other spawns from getting them.
+    std::vector<HANDLE> made_inheritable;
     for (const auto& [h, n] : opt.handles) {
-        HANDLE dup = inherit.get(as_handle(h));
-        if (n >= 0 && n <= 2) stdio[n] = dup;
-        else extra.push_back(dup);
+        if (n >= 0 && n <= 2) {
+            stdio[n] = inherit.get(as_handle(h));
+        } else {
+            DWORD flags = 0;
+            if (GetHandleInformation(as_handle(h), &flags) && !(flags & HANDLE_FLAG_INHERIT) &&
+                SetHandleInformation(as_handle(h), HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT))
+                made_inheritable.push_back(as_handle(h));
+            extra.push_back(as_handle(h));
+        }
     }
     HANDLE null_in = nullptr;
     if (opt.null_stdin && !stdio[0]) {
@@ -403,12 +417,14 @@ int start(const std::vector<std::string>& args, const SpawnOptions& opt, HPCON c
                                    list.empty() ? FALSE : TRUE, flags, env.data(),
                                    cwd.empty() ? nullptr : cwd.c_str(), &si.StartupInfo, &pi);
     const DWORD err = GetLastError();
+    for (HANDLE h : made_inheritable) SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
     DeleteProcThreadAttributeList(attrs);
     if (null_in && null_in != INVALID_HANDLE_VALUE) CloseHandle(null_in);
     if (!ok) {
         error = error_text(("cannot start " + (opt.program.empty() ? args[0] : opt.program)).c_str(), err);
         return -1;
     }
+    if (started) *started = true;
     Child child;
     child.process = pi.hProcess;
     child.console = console;
@@ -430,7 +446,12 @@ int start(const std::vector<std::string>& args, const SpawnOptions& opt, HPCON c
 HANDLE child_process(int pid) {
     std::lock_guard<std::mutex> lock(g_children_mutex);
     auto it = g_children.find(pid);
-    return it == g_children.end() ? nullptr : it->second.process;
+    if (it != g_children.end()) return it->second.process;
+    // Not started by us (a hot restart's successor, see adopt_child): open it.
+    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, FALSE, DWORD(pid));
+    if (!h) return nullptr;
+    g_children[pid].process = h;
+    return h;
 }
 
 } // namespace
@@ -611,6 +632,10 @@ int spawn_process(const std::vector<std::string>& args, const SpawnOptions& opt,
 
 int spawn_child(const std::vector<std::string>& args, std::string& error) { return spawn_process(args, {}, error); }
 
+namespace {
+bool under_wine();
+} // namespace
+
 int spawn_child_pty(const std::vector<std::string>& args, Handle& output, std::string& error) {
     output = kNoHandle;
     HANDLE in_r = nullptr, in_w = nullptr, out_r = nullptr, out_w = nullptr;
@@ -619,7 +644,9 @@ int spawn_child_pty(const std::vector<std::string>& args, Handle& output, std::s
         return -1;
     }
     HPCON console = nullptr;
-    if (auto create = create_pseudo_console(); create && SUCCEEDED(create(COORD{200, 50}, in_r, out_w, 0, &console))) {
+    // Wine's pseudo-console doesn't capture the program's output: pipes there.
+    auto create = under_wine() ? nullptr : create_pseudo_console();
+    if (create && SUCCEEDED(create(COORD{200, 50}, in_r, out_w, 0, &console))) {
         CloseHandle(in_r);
         CloseHandle(out_w);
         CloseHandle(in_w); // the program reads nothing
@@ -633,8 +660,8 @@ int spawn_child_pty(const std::vector<std::string>& args, Handle& output, std::s
         output = from_handle(out_r);
         return pid;
     }
-    // No pseudo-console (Windows before 10 1809): plain pipes. The program's C runtime
-    // then buffers its output in blocks, not lines.
+    // No pseudo-console (Windows before 10 1809, Wine): plain pipes. The program's C
+    // runtime then buffers its output in blocks, not lines.
     CloseHandle(in_r);
     CloseHandle(in_w);
     SpawnOptions opt;
@@ -664,17 +691,45 @@ int wait_child(int pid, const std::function<void()>& on_signal) {
     }
     DWORD code = DWORD(-1);
     GetExitCodeProcess(h, &code);
+    {
+        std::lock_guard<std::mutex> lock(g_children_mutex);
+        g_exited[pid] = g_children[pid];
+        g_children.erase(pid);
+    }
+    return int(code);
+}
+
+void adopt_child(int old_pid, int new_pid) {
+    std::lock_guard<std::mutex> lock(g_children_mutex);
+    auto it = g_children.find(old_pid);
+    Child* old = it != g_children.end() ? &it->second : nullptr;
+    if (!old) {
+        auto e = g_exited.find(old_pid);
+        if (e == g_exited.end()) return;
+        old = &e->second;
+    }
+    Child& next = g_children[new_pid];
+    if (!next.process)
+        next.process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, FALSE, DWORD(new_pid));
+    next.console = old->console;
+    next.job = old->job;
+    old->console = nullptr;
+    old->job = nullptr;
+}
+
+void release_child(int pid) {
     Child child;
     {
         std::lock_guard<std::mutex> lock(g_children_mutex);
-        child = g_children[pid];
-        g_children.erase(pid);
+        auto it = g_exited.find(pid);
+        if (it == g_exited.end()) return;
+        child = it->second;
+        g_exited.erase(it);
     }
     // The pseudo-console keeps its output pipe open until it is closed.
     if (child.console) close_pseudo_console()(child.console);
     if (child.job) CloseHandle(child.job);
-    CloseHandle(child.process);
-    return int(code);
+    if (child.process) CloseHandle(child.process);
 }
 
 void stop_process(int pid, bool force) {
@@ -749,9 +804,15 @@ int run_native_under_wine(const std::vector<std::string>& args, const std::files
     static std::atomic<int> counter{0};
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
-    const std::filesystem::path base =
-        std::filesystem::path(tmp) / ("hotpp-run-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(counter++));
+    // Unique: Wine hands out the same pids again and again.
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    const std::filesystem::path base = std::filesystem::path(tmp) / ("hotpp-run-" + std::to_string(GetCurrentProcessId()) + "-" +
+                                                                     std::to_string(now.QuadPart) + "-" +
+                                                                     std::to_string(counter++));
     const std::filesystem::path out_file = base.wstring() + L".out", status_file = base.wstring() + L".status";
+    std::error_code stale;
+    std::filesystem::remove(status_file, stale);
     const std::string out_u = unix_path(out_file), status_u = unix_path(status_file);
     const std::string cwd_u = cwd.empty() ? std::string() : unix_path(cwd);
     if (out_u.empty() || status_u.empty()) {
@@ -765,10 +826,11 @@ int run_native_under_wine(const std::vector<std::string>& args, const std::files
     argv.insert(argv.end(), args.begin(), args.end());
     SpawnOptions opt;
     opt.null_stdin = true;
-    const int pid = start(argv, opt, nullptr, error);
-    if (pid < 0) return -1;
+    bool started = false;
+    const int pid = start(argv, opt, nullptr, error, &started);
+    if (!started) return -1;
     {
-        // Its handle is of no use (see above).
+        // Its handle (and pid) are of no use (see above).
         std::lock_guard<std::mutex> lock(g_children_mutex);
         auto it = g_children.find(pid);
         if (it != g_children.end()) {
@@ -817,10 +879,16 @@ int run_capture(const std::vector<std::string>& args, const std::filesystem::pat
         output.append(buf, n);
     }
     close_handle(p.read);
-    return wait_child(pid, {});
+    const int code = wait_child(pid, {});
+    release_child(pid);
+    return code;
 }
 
-std::vector<std::string> shell_command(const std::string& command) { return {"cmd.exe", "/d", "/s", "/c", command}; }
+std::vector<std::string> shell_command(const std::string& command) {
+    // Under Wine the build tools are Linux ones: run them with the Linux shell.
+    if (under_wine()) return {"/bin/sh", "-c", command};
+    return {"cmd.exe", "/d", "/s", "/c", command};
+}
 
 const char* shell_description() { return "cmd.exe /c"; }
 

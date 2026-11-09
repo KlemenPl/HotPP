@@ -33,6 +33,8 @@ enum class MsgType : uint16_t {
     ModulesChanged = 12, // agent -> host: libraries were loaded or unloaded (dlopen/dlclose)
     ActiveFrames = 13,   // agent -> host, before a PatchResult: the call stack the patch was applied on
                          // (hosts that don't know it ignore it, so the version stays)
+    Restarting = 14,     // agent -> host, Windows: a hot restart continues as process `pid`
+                         // (there's no exec; Linux keeps its pid and never sends this)
     // Controllers (hotpp mcp) use the host's socket too: their first message is a
     // ControlHello, then both sides exchange JSON in Control messages. Agents never
     // see these; the version field doesn't apply to them (see host/control_protocol.h).

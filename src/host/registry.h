@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -131,8 +132,16 @@ public:
     void remove(const SessionHandle* handle);
     // The connected programs: the newest session of each pid, in connection order.
     std::vector<std::shared_ptr<SessionHandle>> list() const;
-    // The newest session of `pid`, or nullptr.
+    // The newest session of `pid`, or nullptr. A pid a hot restart replaced (Windows)
+    // leads to its successor's session.
     std::shared_ptr<SessionHandle> find(uint32_t pid) const;
+
+    // Windows hot restarts: the program continues as another process.
+    void expect_restart(uint32_t pid);
+    void note_restart(uint32_t old_pid, uint32_t new_pid);
+    // The process `pid` continued as; 0 if none. Waits up to `timeout` for it when a
+    // restart of `pid` is under way.
+    uint32_t successor(uint32_t pid, std::chrono::milliseconds timeout);
 
     // Waits until `ready()` is true, re-checking whenever a session changes; false
     // on timeout or once `abort` is set. ready() runs without the registry locked.
@@ -155,6 +164,8 @@ private:
         uint64_t owner;
     };
     std::map<uint32_t, Override> overrides_;
+    std::map<uint32_t, uint32_t> successors_;
+    std::set<uint32_t> restarting_;
     std::atomic<uint64_t> next_session_{1};
 };
 

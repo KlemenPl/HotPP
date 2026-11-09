@@ -161,6 +161,8 @@ enum class MsgType : uint16_t {
     ModulesChanged = 12, // agent -> host: libraries were loaded or unloaded (dlopen/dlclose)
     ActiveFrames = 13,   // agent -> host, before a PatchResult: the call stack the patch was applied on
                          // (hosts that don't know it ignore it, so the version stays)
+    Restarting = 14,     // agent -> host, Windows: a hot restart continues as process `pid`
+                         // (there's no exec; Linux keeps its pid and never sends this)
     // Controllers (hotpp mcp) use the host's socket too: their first message is a
     // ControlHello, then both sides exchange JSON in Control messages. Agents never
     // see these; the version field doesn't apply to them (see host/control_protocol.h).
@@ -411,6 +413,10 @@ struct ActiveFrames {
     std::vector<uint64_t> addresses;
 };
 
+struct Restarting {
+    uint32_t pid = 0; // the process the program continues as
+};
+
 // Modules keep their index for the life of the process: loaded ones are appended
 // (starting at first_index), unloaded ones are listed and never reused.
 struct ModulesChanged {
@@ -620,6 +626,13 @@ inline void encode(Writer& w, const ActiveFrames& m) {
     w.u32(m.id);
     w.u32(uint32_t(m.addresses.size()));
     for (uint64_t a : m.addresses) w.u64(a);
+}
+
+inline void encode(Writer& w, const Restarting& m) { w.u32(m.pid); }
+
+inline bool decode(Reader& r, Restarting& m) {
+    m.pid = r.u32();
+    return r.ok() && r.at_end();
 }
 
 inline bool decode(Reader& r, ActiveFrames& m) {
@@ -884,8 +897,10 @@ void ipc_close(Connection* c);
 // The command line the process was started with.
 std::vector<std::string> command_line();
 // Hot restart: runs the (rebuilt) executable at `path` with `argv` in place of this
-// process. Returns only on failure, with the reason.
-std::string exec_self(const std::string& path, const std::vector<std::string>& argv);
+// process. `announce` gets the pid the program continues as (this one on Linux,
+// which execs; a new process on Windows) just before this process ends. Returns
+// only on failure, with the reason.
+std::string exec_self(const std::string& path, const std::vector<std::string>& argv, void (*announce)(uint32_t pid));
 
 // Starts `program` (searched on PATH) without waiting for it.
 bool spawn_detached(const std::string& program, const std::vector<std::string>& args);
@@ -1434,8 +1449,24 @@ std::vector<std::string> command_line() {
     return out;
 }
 
-std::string exec_self(const std::string&, const std::vector<std::string>&) {
-    return "hot restart is not supported on Windows yet";
+std::string exec_self(const std::string& path, const std::vector<std::string>&, void (*announce)(uint32_t)) {
+    // No exec on Windows: start the rebuilt executable with this process's command
+    // line, standard handles (and console) and environment, then end this one. It is
+    // created suspended so the host learns its pid before it can connect.
+    std::wstring cmd = GetCommandLineW();
+    const std::wstring app = widen(path);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(app.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                        nullptr, nullptr, &si, &pi))
+        return win::error_text(("cannot start " + path).c_str());
+    announce(uint32_t(pi.dwProcessId));
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    TerminateProcess(GetCurrentProcess(), 0);
+    return "TerminateProcess returned";
 }
 
 bool spawn_detached(const std::string& program, const std::vector<std::string>& args) {
@@ -1976,10 +2007,11 @@ std::vector<std::string> command_line() {
     return out;
 }
 
-std::string exec_self(const std::string& path, const std::vector<std::string>& args) {
+std::string exec_self(const std::string& path, const std::vector<std::string>& args, void (*announce)(uint32_t)) {
     std::vector<char*> argv;
     for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
     argv.push_back(nullptr);
+    announce(current_pid());
     // Descriptors the app didn't mark close-on-exec stay open, as with any exec.
     execv(path.c_str(), argv.data());
     return std::string("exec ") + path + ": " + std::strerror(errno);
@@ -2614,11 +2646,21 @@ void restart_now() {
     agent::set_env("HOTPP_RESTARTED", std::to_string((count.empty() ? 0 : std::atoi(count.c_str())) + 1));
     std::fflush(nullptr);
     s.stopping = true;
+    const std::string error = agent::exec_self(s.exe, s.argv, [](uint32_t next_pid) {
+        AgentState& st = state();
+        if (next_pid != agent::current_pid()) {
+            Writer w;
+            encode(w, Restarting{next_pid});
+            send_message(st, MsgType::Restarting, w);
+        }
+        std::lock_guard<std::mutex> lock(st.send_mutex);
+        if (st.conn) agent::ipc_shutdown(st.conn); // the host sees the old session end
+    });
     {
+        // As after a successful restart, this session ends (Windows fails before announcing).
         std::lock_guard<std::mutex> lock(s.send_mutex);
-        if (s.conn) agent::ipc_shutdown(s.conn); // the host sees the old session end
+        if (s.conn) agent::ipc_shutdown(s.conn);
     }
-    const std::string error = agent::exec_self(s.exe, s.argv);
     agent::log("hot restart failed: %s; the program keeps running without hot reload", error.c_str());
 }
 

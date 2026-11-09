@@ -351,8 +351,24 @@ std::vector<std::string> command_line() {
     return out;
 }
 
-std::string exec_self(const std::string&, const std::vector<std::string>&) {
-    return "hot restart is not supported on Windows yet";
+std::string exec_self(const std::string& path, const std::vector<std::string>&, void (*announce)(uint32_t)) {
+    // No exec on Windows: start the rebuilt executable with this process's command
+    // line, standard handles (and console) and environment, then end this one. It is
+    // created suspended so the host learns its pid before it can connect.
+    std::wstring cmd = GetCommandLineW();
+    const std::wstring app = widen(path);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(app.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                        nullptr, nullptr, &si, &pi))
+        return win::error_text(("cannot start " + path).c_str());
+    announce(uint32_t(pi.dwProcessId));
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    TerminateProcess(GetCurrentProcess(), 0);
+    return "TerminateProcess returned";
 }
 
 bool spawn_detached(const std::string& program, const std::vector<std::string>& args) {

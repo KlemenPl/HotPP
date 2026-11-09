@@ -139,11 +139,21 @@ void restart_now() {
     agent::set_env("HOTPP_RESTARTED", std::to_string((count.empty() ? 0 : std::atoi(count.c_str())) + 1));
     std::fflush(nullptr);
     s.stopping = true;
+    const std::string error = agent::exec_self(s.exe, s.argv, [](uint32_t next_pid) {
+        AgentState& st = state();
+        if (next_pid != agent::current_pid()) {
+            Writer w;
+            encode(w, Restarting{next_pid});
+            send_message(st, MsgType::Restarting, w);
+        }
+        std::lock_guard<std::mutex> lock(st.send_mutex);
+        if (st.conn) agent::ipc_shutdown(st.conn); // the host sees the old session end
+    });
     {
+        // As after a successful restart, this session ends (Windows fails before announcing).
         std::lock_guard<std::mutex> lock(s.send_mutex);
-        if (s.conn) agent::ipc_shutdown(s.conn); // the host sees the old session end
+        if (s.conn) agent::ipc_shutdown(s.conn);
     }
-    const std::string error = agent::exec_self(s.exe, s.argv);
     agent::log("hot restart failed: %s; the program keeps running without hot reload", error.c_str());
 }
 

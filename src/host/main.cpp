@@ -33,6 +33,7 @@ constexpr const char* kUsage =
     "usage: hotpp [options] [--once]\n"
     "       hotpp [options] -- <program> [args...]\n"
     "       hotpp mcp [mcp options]    (see hotpp mcp --help)\n"
+    "       hotpp restart [--pid N]    rebuild and restart programs (see hotpp restart --help)\n"
     "\n"
     "Without a program, waits for agents to connect (--once: exit after the first\n"
     "one disconnects). With a program, starts it connected to this host and exits\n"
@@ -208,6 +209,7 @@ void shut_down(host::Listener& listener, std::thread& acceptor, Server& server) 
 
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "mcp") == 0) return hotpp::mcp::run(argc - 1, argv + 1);
+    if (argc >= 2 && std::strcmp(argv[1], "restart") == 0) return hotpp::mcp::run_restart(argc - 1, argv + 1);
 
     Options opt;
     if (!parse_args(argc, argv, opt)) {
@@ -358,10 +360,24 @@ int main(int argc, char** argv) {
 
         // Ctrl+C reaches the child too (same process group); a stop request sent to
         // the host alone, or a second Ctrl+C, is passed on.
-        const int code = host::wait_child(pid, [pid] {
-            if (g_terminate) host::stop_process(pid, false);
-            if (g_interrupts >= 2) host::stop_process(pid, true);
-        });
+        int current = pid;
+        auto forward = [&current] {
+            if (g_terminate) host::stop_process(current, false);
+            if (g_interrupts >= 2) host::stop_process(current, true);
+        };
+        int code = host::wait_child(current, forward);
+        // Windows: a hot restart continues the program as another process.
+        std::vector<int> waited{current};
+        while (const uint32_t next = ctx.registry.successor(uint32_t(current), std::chrono::seconds(10))) {
+            current = int(next);
+            {
+                std::lock_guard<std::mutex> lock(ctx.child.mutex);
+                ctx.child.pid = current;
+            }
+            code = host::wait_child(current, forward);
+            waited.push_back(current);
+        }
+        for (int p : waited) host::release_child(p);
         {
             std::lock_guard<std::mutex> lock(ctx.child.mutex);
             ctx.child.running = false;

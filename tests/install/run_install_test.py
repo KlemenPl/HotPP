@@ -25,20 +25,23 @@ def main() -> int:
     ap.add_argument("--build-dir", required=True)
     ap.add_argument("--consumer", required=True)
     ap.add_argument("--cxx", required=True)
+    ap.add_argument("--generator", default="", help="the CMake generator the build used")
     args = ap.parse_args()
+    exe = ".exe" if os.name == "nt" else ""
     tmp = tempfile.mkdtemp(prefix="hotpp-install-")
     try:
         prefix = os.path.join(tmp, "prefix")
         run(["cmake", "--install", args.build_dir, "--prefix", prefix])
-        for f in ("bin/hotpp", "include/hotpp/hotpp.h", "share/hotpp/single_include/hotpp/hotpp.h",
+        for f in ("bin/hotpp" + exe, "include/hotpp/hotpp.h", "share/hotpp/single_include/hotpp/hotpp.h",
                   "lib/cmake/HotPP/HotPPConfig.cmake"):
             if not os.path.exists(os.path.join(prefix, f)):
                 raise SystemExit(f"error: {f} was not installed")
         build = os.path.join(tmp, "build")
-        run(["cmake", "-S", args.consumer, "-B", build, f"-DCMAKE_PREFIX_PATH={prefix}",
+        generator = ["-G", args.generator] if args.generator else []
+        run(["cmake", "-S", args.consumer, "-B", build, *generator, f"-DCMAKE_PREFIX_PATH={prefix}",
              f"-DCMAKE_CXX_COMPILER={args.cxx}"])
         run(["cmake", "--build", build])
-        out = run([os.path.join(prefix, "bin", "hotpp"), "--", os.path.join(build, "consumer"), "5"])
+        out = run([os.path.join(prefix, "bin", "hotpp" + exe), "--", os.path.join(build, "consumer" + exe), "5"])
         if "agent connected" not in out or "frame 4 value 1" not in out:
             raise SystemExit("error: the consumer did not run connected to the installed host")
         return 0

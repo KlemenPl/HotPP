@@ -8,8 +8,9 @@ changes, a rebuild and restart, output and logs, malformed input. Then it
 attaches to a host started the usual way (`hotpp -- program`), and checks that a
 launched program dies with the MCP server even when the server is killed.
 
-Hosts are found in $XDG_RUNTIME_DIR, so the test uses a private one: other tests'
-hosts running in parallel stay out of it.
+Hosts are found in $XDG_RUNTIME_DIR (Windows: by pipe name), so the test uses a
+private one: other tests' hosts running in parallel stay out of it. With
+--emulator (a cross build), hotpp runs under it, e.g. Wine.
 """
 import argparse
 import json
@@ -23,6 +24,18 @@ import sys
 import tempfile
 import threading
 import time
+
+
+# Processes start in a session of their own (POSIX), so they can be killed with
+# everything they started.
+NEW_SESSION = {"start_new_session": True} if os.name == "posix" else {}
+
+
+def kill_tree(proc):
+    if os.name == "posix":
+        os.killpg(proc.pid, signal.SIGKILL)
+    else:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
 
 
 class Failure(Exception):
@@ -39,7 +52,7 @@ class Client:
 
     def __init__(self, cmd, env):
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
-                                     env=env, text=True, bufsize=1, start_new_session=True)
+                                     env=env, text=True, bufsize=1, **NEW_SESSION)
         self.replies = {}
         self.unmatched = []  # replies with a null id (parse errors)
         self.progress = []
@@ -125,7 +138,12 @@ def main():
     ap.add_argument("--work", required=True)
     ap.add_argument("--build-dir", required=True)
     ap.add_argument("--target", required=True)
+    ap.add_argument("--emulator", default="", help="command (parts separated by |) that runs hotpp: wine, for cross builds")
     args = ap.parse_args()
+    emulator = [a for a in args.emulator.split("|") if a]
+    # A Windows build (native or under an emulator): pipes instead of sockets, and a
+    # hot restart continues as a new process.
+    windows = args.exe.endswith(".exe")
 
     v1_dir = os.path.join(args.case, "v1")
     originals = {}
@@ -152,9 +170,11 @@ def main():
     if os.path.exists(stop_file):
         os.remove(stop_file)
     env = dict(os.environ, XDG_RUNTIME_DIR=runtime)
+    if windows:
+        env["HOTPP_ENDPOINT_PREFIX"] = rf"\\.\pipe\hotpp-mcp-test-{os.getpid()}"
     env.pop("HOTPP_ENDPOINT", None)
     build = f"cmake --build {args.build_dir} --target {args.target}"
-    mcp_cmd = [args.host, "mcp", "--structured", "--build", build]
+    mcp_cmd = [*emulator, args.host, "mcp", "--structured", "--build", build]
     rebuilt = False
     others = []
     client = None
@@ -324,7 +344,10 @@ def main():
         res = client.tool("hotpp_restart")
         sc = res["structuredContent"]
         check(not res["isError"] and sc["outcome"] == "restarted", "restart", text_of(res))
-        check(sc["program"]["pid"] == pid, "same pid after the restart")
+        if windows:
+            pid = sc["program"]["pid"]  # a new process: Windows has no exec
+        else:
+            check(sc["program"]["pid"] == pid, "same pid after the restart")
         wait_output(r"started restarted=1")
         wait_output(r"value=4 label=two")
 
@@ -334,8 +357,8 @@ def main():
         check("No program" in text_of(res), "nothing left after stop", text_of(res))
 
         # --- a host started the usual way ------------------------------------------
-        user = subprocess.Popen([args.host, "--", args.exe], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                env=dict(env, HOTPP_E2E_STOP=stop_file), text=True, bufsize=1, start_new_session=True)
+        user = subprocess.Popen([*emulator, args.host, "--", args.exe], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                env=dict(env, HOTPP_E2E_STOP=stop_file), text=True, bufsize=1, **NEW_SESSION)
         others.append(user)
         user_lines = queue.Queue()
         threading.Thread(target=lambda: [user_lines.put(l) for l in user.stdout], daemon=True).start()
@@ -385,11 +408,21 @@ def main():
         check(not res["isError"], "second launch", text_of(res))
         child = res["structuredContent"]["program"]["pid"]
         host_pid = res["structuredContent"]["host"]["pid"]
-        os.kill(client.proc.pid, signal.SIGKILL)
+        client.proc.kill()
         client.proc.wait(10)
         client = None
         deadline = time.monotonic() + 10
-        while True:
+        while windows:
+            # The pids are Windows ones: ask a fresh hotpp mcp what still runs.
+            probe = Client(mcp_cmd, env)
+            probe.request("initialize", {"protocolVersion": "2025-06-18"})
+            gone = "No program" in text_of(probe.tool("hotpp_status"))
+            probe.close()
+            if gone:
+                break
+            check(time.monotonic() < deadline, "still running after hotpp mcp was killed")
+            time.sleep(0.5)
+        while not windows:
             alive = []
             for p in (child, host_pid):
                 try:
@@ -415,7 +448,7 @@ def main():
                 client.proc.kill()
         for p in others:
             if p.poll() is None:
-                os.killpg(p.pid, signal.SIGKILL)
+                kill_tree(p)
                 p.wait()
         for path, (content, st) in originals.items():
             with open(path, "wb") as f:

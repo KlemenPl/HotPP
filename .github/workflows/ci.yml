@@ -57,7 +57,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl git nodejs \
-            clang-19 lld-19 llvm-19 cmake make python3 wine wine64
+            clang-19 clang-tools-19 lld-19 llvm-19 cmake make python3 wine wine64
       - uses: actions/checkout@v4
       - name: Fetch the MSVC runtime and Windows SDK
         run: |

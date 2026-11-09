@@ -453,6 +453,9 @@ void keep_private(Handle h) { ::fcntl(int(h), F_SETFD, FD_CLOEXEC); }
 
 // ---- processes ---------------------------------------------------------------
 
+void adopt_child(int, int) {}
+void release_child(int) {}
+
 void stop_process(int pid, bool force) { ::kill(pid, force ? SIGKILL : SIGTERM); }
 
 void kill_process_group(int pid) { ::kill(-pid, SIGKILL); }

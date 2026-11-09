@@ -308,10 +308,11 @@ std::vector<std::string> command_line() {
     return out;
 }
 
-std::string exec_self(const std::string& path, const std::vector<std::string>& args) {
+std::string exec_self(const std::string& path, const std::vector<std::string>& args, void (*announce)(uint32_t)) {
     std::vector<char*> argv;
     for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
     argv.push_back(nullptr);
+    announce(current_pid());
     // Descriptors the app didn't mark close-on-exec stay open, as with any exec.
     execv(path.c_str(), argv.data());
     return std::string("exec ") + path + ": " + std::strerror(errno);

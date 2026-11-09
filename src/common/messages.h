@@ -90,6 +90,10 @@ struct ActiveFrames {
     std::vector<uint64_t> addresses;
 };
 
+struct Restarting {
+    uint32_t pid = 0; // the process the program continues as
+};
+
 // Modules keep their index for the life of the process: loaded ones are appended
 // (starting at first_index), unloaded ones are listed and never reused.
 struct ModulesChanged {
@@ -299,6 +303,13 @@ inline void encode(Writer& w, const ActiveFrames& m) {
     w.u32(m.id);
     w.u32(uint32_t(m.addresses.size()));
     for (uint64_t a : m.addresses) w.u64(a);
+}
+
+inline void encode(Writer& w, const Restarting& m) { w.u32(m.pid); }
+
+inline bool decode(Reader& r, Restarting& m) {
+    m.pid = r.u32();
+    return r.ok() && r.at_end();
 }
 
 inline bool decode(Reader& r, ActiveFrames& m) {
