@@ -3,3 +3,4 @@
 .hotpp/
 .cache/
 compile_commands.json
+/.xwin-cache/

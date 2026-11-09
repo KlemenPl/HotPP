@@ -1,5 +1,9 @@
 #include "host/image/elf_image.h"
 
+#include "host/image/pe_image.h"
+
+#include <fstream>
+
 namespace hotpp::image {
 
 using namespace hotpp::elf;
@@ -54,6 +58,16 @@ std::unique_ptr<ElfImage> ElfImage::from_file(ElfFile elf) {
         img->dwarf_warning_ = e.what();
     }
     return img;
+}
+
+std::unordered_map<std::string, TypeLayout> ElfImage::type_layouts() const { return dwarf_type_layouts(file_); }
+
+std::unique_ptr<ModuleImage> load_module_image(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    char magic[2] = {};
+    in.read(magic, 2);
+    if (magic[0] == 'M' && magic[1] == 'Z') return PeImage::load(path);
+    return ElfImage::load(path);
 }
 
 bool ElfImage::section_writable(uint32_t shndx) const {

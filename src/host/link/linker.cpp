@@ -20,7 +20,7 @@ using object::ElfObject;
 using object::ObjSection;
 using object::ObjSymbol;
 
-enum class SecKind { Skip, Text, ReadOnly, Data, Bss, EhFrame, InitArray, Tls };
+enum class SecKind { Skip, Text, ReadOnly, Data, Bss, EhFrame, Pdata, InitArray, Tls };
 
 struct SecState {
     SecKind kind = SecKind::Skip;
@@ -40,8 +40,8 @@ struct ObjState {
 };
 
 struct Target {
-    enum Kind { Absolute, InPatch, External, Shadow, Tls } kind = Absolute;
-    uint64_t value = 0; // Absolute/External: address. InPatch/Shadow: section offset. Tls: template offset
+    enum Kind { Absolute, InPatch, External, Shadow, Tls, Got } kind = Absolute;
+    uint64_t value = 0; // Absolute/External: address. InPatch/Shadow: section offset. Tls: template offset. Got: slot
     size_t obj = 0;
     uint32_t sec = 0;
 };
@@ -61,8 +61,13 @@ struct InitEntry {
 
 bool starts_with(const std::string& s, const char* prefix) { return s.rfind(prefix, 0) == 0; }
 
+// vtables, VTTs, RTTI and (MSVC) throw information: existing objects and the
+// exception machinery refer to the program's copies.
 bool is_vtable_or_rtti(const std::string& n) {
-    return starts_with(n, "_ZTV") || starts_with(n, "_ZTI") || starts_with(n, "_ZTS") || starts_with(n, "_ZTT");
+    return starts_with(n, "_ZTV") || starts_with(n, "_ZTI") || starts_with(n, "_ZTS") || starts_with(n, "_ZTT") ||
+           starts_with(n, "??_7") || starts_with(n, "??_8") || starts_with(n, "??_R0") || starts_with(n, "??_R1") ||
+           starts_with(n, "??_R2") || starts_with(n, "??_R3") || starts_with(n, "??_R4") || starts_with(n, "_TI") ||
+           starts_with(n, "_CTA") || starts_with(n, "_CT??");
 }
 
 // Functions the compiler generates to run (or undo) dynamic initialization.
@@ -70,7 +75,7 @@ bool is_initializer_function(const std::string& n) {
     return starts_with(n, "_GLOBAL__sub_I_") || starts_with(n, "_GLOBAL__I_") ||
            starts_with(n, "__cxx_global_var_init") || starts_with(n, "__cxx_global_array_dtor") ||
            n.find("__static_initialization_and_destruction") != std::string::npos || starts_with(n, "__tcf_") ||
-           starts_with(n, "__dtor_");
+           starts_with(n, "__dtor_") || starts_with(n, "??__E") || starts_with(n, "??__F");
 }
 
 bool named(const ObjSymbol& s) {
@@ -92,6 +97,8 @@ uint64_t align_up(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
 
 std::string file_of(const ElfObject& o) { return o.source_name.empty() ? o.path : o.source_name; }
 
+bool coff(const ElfObject& o) { return o.format == object::Format::Coff; }
+
 int init_priority(const std::string& name) {
     // .init_array.NNNNN runs in ascending priority, before plain .init_array.
     if (starts_with(name, ".init_array.")) return std::atoi(name.c_str() + 12);
@@ -104,6 +111,7 @@ SecKind classify(const ObjSection& s, const ElfObject& o, std::vector<std::strin
     case SHT_GROUP: case SHT_NOTE: case SHT_RELA: case SHT_SYMTAB: case SHT_STRTAB: return SecKind::Skip;
     default: break;
     }
+    if (s.type == SHT_X86_64_UNWIND && coff(o)) return SecKind::Pdata;
     if (s.type == SHT_X86_64_UNWIND || s.name == ".eh_frame") return SecKind::EhFrame;
     if (s.type == SHT_INIT_ARRAY || starts_with(s.name, ".init_array")) return SecKind::InitArray;
     if (s.type == SHT_FINI_ARRAY || s.type == SHT_PREINIT_ARRAY || starts_with(s.name, ".fini_array") ||
@@ -129,7 +137,7 @@ bool is_tls_reloc(uint32_t t) {
     switch (t) {
     case R_X86_64_TLSGD: case R_X86_64_TLSLD: case R_X86_64_DTPOFF32: case R_X86_64_GOTTPOFF:
     case R_X86_64_TPOFF32: case R_X86_64_DTPMOD64: case R_X86_64_DTPOFF64: case R_X86_64_TPOFF64:
-    case R_X86_64_GOTPC32_TLSDESC: case R_X86_64_TLSDESC_CALL:
+    case R_X86_64_GOTPC32_TLSDESC: case R_X86_64_TLSDESC_CALL: case R_HOTPP_SECREL32:
         return true;
     default: return false;
     }
@@ -152,6 +160,7 @@ public:
         dedupe_comdats();
         classify_sections();
         find_existing();
+        check_msvc_type_changes();
         bind_data();
         collect_globals();
         resolve_externals();
@@ -162,7 +171,7 @@ public:
         apply_relocations();
         make_sites_and_delta();
         emit();
-        if (opt_.debug_objects) build_debug_objects();
+        if (opt_.debug_objects && !st_.empty() && !coff(*st_[0].obj)) build_debug_objects();
         return std::move(out_);
     }
 
@@ -172,14 +181,16 @@ private:
     // Copied into the patch image.
     static bool loaded(const SecState& s) {
         if (s.discarded || s.bound_old) return false;
-        return s.kind == SecKind::Text || s.kind == SecKind::ReadOnly || is_data(s.kind) || s.kind == SecKind::EhFrame;
+        return s.kind == SecKind::Text || s.kind == SecKind::ReadOnly || is_data(s.kind) || s.kind == SecKind::EhFrame ||
+               s.kind == SecKind::Pdata;
     }
 
     // Defines symbols the patch can refer to (loaded, or bound to the old program).
     bool defined_here(size_t o, const ObjSymbol& s) const {
         if (!s.defined() || s.shndx >= SHN_LORESERVE) return false;
         const SecState& ss = st_[o].secs[s.shndx];
-        return !ss.discarded && ss.kind != SecKind::Skip && ss.kind != SecKind::InitArray && ss.kind != SecKind::EhFrame;
+        return !ss.discarded && ss.kind != SecKind::Skip && ss.kind != SecKind::InitArray && ss.kind != SecKind::EhFrame &&
+               ss.kind != SecKind::Pdata;
     }
 
     void dedupe_comdats() {
@@ -226,6 +237,39 @@ private:
                     e = nullptr;
                 }
                 st_[o].existing[k] = e;
+            }
+        }
+    }
+
+    // MSVC decorates a variable's name with its type ("?counter@@3HA" is an int):
+    // the part before the type identifies the variable.
+    static std::string msvc_variable_prefix(const std::string& n) {
+        if (n.size() < 4 || n[0] != '?') return {};
+        const size_t at = n.find("@@");
+        if (at == std::string::npos || at + 2 >= n.size() || n[at + 2] < '0' || n[at + 2] > '4') return {};
+        return n.substr(0, at + 3);
+    }
+
+    // A new MSVC variable that has an existing one's name and scope but another
+    // type: its type changed, which the running program's code can't follow.
+    void check_msvc_type_changes() {
+        for (size_t o = 0; o < st_.size(); ++o) {
+            const ElfObject& ob = obj(o);
+            if (!coff(ob)) continue;
+            for (size_t k = 0; k < ob.symbols.size(); ++k) {
+                const ObjSymbol& s = ob.symbols[k];
+                if (s.bind == STB_LOCAL || !named(s) || !defined_here(o, s) || st_[o].existing[k]) continue;
+                const SecKind kind = st_[o].secs[s.shndx].kind;
+                if (!is_data(kind) && kind != SecKind::Tls && kind != SecKind::ReadOnly) continue;
+                const std::string prefix = msvc_variable_prefix(s.name);
+                std::string old_name;
+                const IndexEntry* e = prefix.empty() ? nullptr : index_.find_global_prefix(prefix, s.name, old_name);
+                if (!e || e->kind == SymbolKind::Function) continue;
+                const std::string plain = s.name.substr(1, s.name.find('@') - 1);
+                throw RestartRequired("type of " + plain + " changed (" + old_name + " -> " + s.name + ")" +
+                                      (e->size && s.size && e->size != s.size
+                                           ? ", size from " + std::to_string(e->size) + " to " + std::to_string(s.size) + " bytes"
+                                           : ""));
             }
         }
     }
@@ -312,14 +356,27 @@ private:
     }
 
     // Names only another module can provide, looked up in one round trip.
+    // `__imp_X` (MSVC: the import address slot of X) for an X the program doesn't
+    // import itself gets a slot in the patch holding X's address.
+    static bool import_slot_name(const std::string& n) { return n.size() > 6 && starts_with(n, "__imp_"); }
+
     void resolve_externals() {
         std::set<std::string> names;
+        auto known = [&](const std::string& n) {
+            return globals_.count(n) || index_.find({false, "", n}) || index_.find({true, "", n});
+        };
         auto consider = [&](size_t o, const Rela& r) {
-            const ObjSymbol& s = obj(o).symbols[r.sym()];
-            if (s.type == STT_SECTION || s.bind == STB_LOCAL) return;
-            if (defined_here(o, s) || s.shndx == SHN_ABS) return;
-            if (globals_.count(s.name) || index_.find({false, "", s.name}) || index_.find({true, "", s.name})) return;
-            names.insert(s.name);
+            const ObjSymbol* s = &obj(o).symbols[r.sym()];
+            if (s->type == STT_SECTION || s->bind == STB_LOCAL) return;
+            if (defined_here(o, *s) || s->shndx == SHN_ABS) return;
+            if (known(s->name)) return;
+            // A weak external falls back to its alias.
+            if (s->bind == STB_WEAK && s->alias < obj(o).symbols.size()) {
+                const ObjSymbol& a = obj(o).symbols[s->alias];
+                if (defined_here(o, a) || known(a.name)) return;
+                names.insert(a.name);
+            }
+            names.insert(import_slot_name(s->name) ? s->name.substr(6) : s->name);
         };
         for_each_reloc([&](size_t o, uint32_t, const Rela& r) { consider(o, r); });
         for (size_t o = 0; o < st_.size(); ++o)
@@ -330,6 +387,13 @@ private:
         const std::vector<std::string> list(names.begin(), names.end());
         const std::vector<uint64_t> addrs = resolve_(list);
         for (size_t i = 0; i < list.size() && i < addrs.size(); ++i) external_[list[i]] = addrs[i];
+    }
+
+    // The slot for `__imp_X` (see import_slot_name), allocated on first use.
+    size_t import_slot(const std::string& name) const {
+        auto x = external_.find(name.substr(6));
+        if (x == external_.end() || !x->second) throw LinkError("undefined symbol " + name.substr(6));
+        return const_cast<Linker*>(this)->got_slot("i" + name, {GotSlot{true, {}, x->second}});
     }
 
     Target section_target(size_t o, uint32_t sec, uint64_t offset, bool in_init) const {
@@ -391,6 +455,9 @@ private:
         if (const IndexEntry* e = index_.find({true, "", s.name})) return {Target::Absolute, e->address};
         auto x = external_.find(s.name);
         if (x != external_.end() && x->second) return {Target::External, x->second};
+        if (import_slot_name(s.name) && external_.count(s.name.substr(6))) return {Target::Got, import_slot(s.name)};
+        if (s.bind == STB_WEAK && s.alias < ob.symbols.size() && depth < 4)
+            return resolve_symbol(o, s.alias, call, in_init, depth + 1);
         if (s.bind == STB_WEAK) return {Target::Absolute, 0};
         throw LinkError("undefined symbol " + s.name + " (referenced from " + file_of(ob) + ")");
     }
@@ -400,6 +467,7 @@ private:
         case Target::InPatch: return st_[t.obj].secs[t.sec].addr + t.value;
         case Target::Shadow: return st_[t.obj].secs[t.sec].shadow_addr + t.value;
         case Target::Tls: throw LinkError("a thread_local variable is accessed like an ordinary one");
+        case Target::Got: return got_base_ + 8 * t.value;
         default: return t.value;
         }
     }
@@ -512,7 +580,7 @@ private:
 
     Target canonical_section_target(size_t o, uint32_t from_sec, const Rela& r, const Target& t) const {
         const uint32_t type = r.type();
-        if (t.kind != Target::InPatch || is_branch(o, from_sec, r)) return t;
+        if (t.kind != Target::InPatch || is_branch(o, from_sec, r) || type == R_HOTPP_RVA32) return t;
         if (st_[o].secs[from_sec].kind == SecKind::EhFrame) return t;
         const ObjSymbol& s = obj(o).symbols[r.sym()];
         if (s.type != STT_SECTION || st_[t.obj].secs[t.sec].kind != SecKind::Text) return t;
@@ -571,13 +639,19 @@ private:
     }
 
     void plan_got_and_stubs() {
+        // Import slots first: they're allocated when first resolved.
+        for_each_reloc([&](size_t o, uint32_t si, const Rela& r) {
+            if (import_slot_name(obj(o).symbols[r.sym()].name)) resolve_symbol(o, r.sym(), false, st_[o].secs[si].init_code);
+        });
         for_each_reloc([&](size_t o, uint32_t si, const Rela& r) {
             const uint32_t type = r.type();
             const bool in_init = st_[o].secs[si].init_code;
             if (is_got(type)) {
                 const Target t = canonical_section_target(o, si, r, resolve_symbol(o, r.sym(), false, in_init));
                 got_slot(target_key(t), {GotSlot{false, t, 0}});
-            } else if (is_branch(o, si, r)) {
+            } else if (is_branch(o, si, r) || type == R_HOTPP_RVA32) {
+                // Branches, and RVAs (unwind handlers), to other modules go through
+                // stubs: those may lie out of rel32 or 4 GB reach.
                 const Target t = resolve_symbol(o, r.sym(), true, in_init);
                 if (t.kind == Target::External && !stub_index_.count(t.value)) {
                     stub_index_[t.value] = stub_targets_.size();
@@ -608,6 +682,10 @@ private:
                     SecState& ss = os.secs[i];
                     if (ss.kind != kind || !loaded(ss)) continue;
                     const ObjSection& sec = os.obj->sections[i];
+                    // COFF functions have no padding of their own (the linker adds it
+                    // with /FUNCTIONPADMIN): leave int3 bytes before each, so a later
+                    // patch can redirect it.
+                    if (kind == SecKind::Text && coff(*os.obj)) offset += kPadBytes;
                     offset = align_up(offset, std::max<uint64_t>(sec.align, 1));
                     ss.addr = base + offset;
                     offset += sec.size;
@@ -654,6 +732,18 @@ private:
                 off += os.obj->sections[i].size;
             }
         if (eh_frame_) off += 4;
+        // PE unwind tables (RUNTIME_FUNCTION entries), back to back.
+        off = align_up(off, 4);
+        pdata_ = ro_start_ + off;
+        for (ObjState& os : st_)
+            for (size_t i = 0; i < os.secs.size(); ++i) {
+                SecState& ss = os.secs[i];
+                if (ss.kind != SecKind::Pdata || !loaded(ss) || os.obj->sections[i].size == 0) continue;
+                if (os.obj->sections[i].size % 12) throw LinkError("malformed .pdata in " + file_of(*os.obj));
+                ss.addr = ro_start_ + off;
+                off += os.obj->sections[i].size;
+            }
+        pdata_bytes_ = ro_start_ + off - pdata_;
         ro_size_ = align_up(off, page);
 
         off = 0;
@@ -736,8 +826,11 @@ private:
                 put32(p, uint32_t(int32_t(v)));
             };
             const bool branch = is_branch(o, si, r);
+            // Image-relative references (COFF unwind and exception tables) describe the
+            // new code, like calls; addresses taken elsewhere stay canonical.
+            const bool new_code = branch || type == R_HOTPP_RVA32;
             auto sym_target = [&](bool) {
-                return canonical_section_target(o, si, r, resolve_symbol(o, r.sym(), branch, in_init));
+                return canonical_section_target(o, si, r, resolve_symbol(o, r.sym(), new_code, in_init));
             };
 
             switch (type) {
@@ -783,6 +876,21 @@ private:
                 break;
             }
             case R_X86_64_DTPMOD64: put64(p, tls_module()); break;
+            case R_HOTPP_RVA32: {
+                const Target t = sym_target(false);
+                const uint64_t target = t.kind == Target::External ? stub_base_ + 16 * stub_index_.at(t.value) : address(t);
+                const int64_t v = int64_t(target + uint64_t(A) - opt_.image_base);
+                if (!opt_.image_base || v < 0 || v > int64_t(0xffffffffll))
+                    throw LinkError("image-relative reference to " + hex(target) + " is out of range in " + file_of(ob));
+                put32(p, uint32_t(v));
+                break;
+            }
+            case R_HOTPP_SECREL32: {
+                const Target t = sym_target(false);
+                if (t.kind != Target::Tls) throw LinkError("section-relative reference to a variable that isn't thread_local");
+                signed32(int64_t(t.value) + A);
+                break;
+            }
             default:
                 throw LinkError("unsupported relocation type " + std::to_string(type) + " in " + sec.name + " of " + file_of(ob));
             }
@@ -790,6 +898,15 @@ private:
 
         for (size_t i = 0; i < got_.size(); ++i)
             put64(buffer_at(got_base_ + 8 * i, 8), got_[i].is_value ? got_[i].value : address(got_[i].target));
+
+        // The unwinder looks functions up in the table by binary search.
+        if (pdata_bytes_) {
+            struct RuntimeFunction {
+                uint32_t begin, end, unwind;
+            };
+            auto* rf = reinterpret_cast<RuntimeFunction*>(buffer_at(pdata_, pdata_bytes_));
+            std::sort(rf, rf + pdata_bytes_ / 12, [](const RuntimeFunction& a, const RuntimeFunction& b) { return a.begin < b.begin; });
+        }
     }
 
     void make_sites_and_delta() {
@@ -823,7 +940,11 @@ private:
                 const ObjSection& sec = ob.sections[s.shndx];
                 FunctionVersion v;
                 v.entry = addr;
-                if (s.value >= kPadBytes && s.value <= sec.size && sec.data) {
+                if (coff(ob)) {
+                    // The padding is the int3 bytes layout() left before the section.
+                    if (s.value == 0 && sec.size >= 2 && addr >= text_start_ + kPadBytes)
+                        v.site = analyze_patch_site(buffer_at(addr - kPadBytes, kPadBytes + 2), kPadBytes + 2, SiteStyle::Hotpatch);
+                } else if (s.value >= kPadBytes && s.value <= sec.size && sec.data) {
                     const uint64_t from = s.value - kPadBytes;
                     v.site = analyze_patch_site(sec.data + from, size_t(std::min<uint64_t>(kSiteProbeBytes, sec.size - from)));
                 }
@@ -870,6 +991,8 @@ private:
         if (ro_size_) out_.patch.segments.push_back({ro_start_, ro_size_, proto::kProtRead, ro_});
         if (data_size_) out_.patch.segments.push_back({data_start_, data_size_, proto::kProtRead | proto::kProtWrite, data_});
         if (eh_frame_) out_.patch.eh_frames.push_back(eh_frame_);
+        // PE: the table's address and entry count, as a pair.
+        if (pdata_bytes_) out_.patch.eh_frames.insert(out_.patch.eh_frames.end(), {pdata_, pdata_bytes_ / 12});
         for (const Target& t : run_) out_.patch.initializers.push_back(address(t));
         out_.bytes_used = data_start_ + data_size_ - opt_.region_cursor;
     }
@@ -964,7 +1087,7 @@ private:
     std::vector<uint64_t> stub_targets_;
     std::vector<Target> run_; // initializers to call
     uint64_t text_start_ = 0, text_size_ = 0, stub_base_ = 0;
-    uint64_t ro_start_ = 0, ro_size_ = 0, got_base_ = 0, eh_frame_ = 0;
+    uint64_t ro_start_ = 0, ro_size_ = 0, got_base_ = 0, eh_frame_ = 0, pdata_ = 0, pdata_bytes_ = 0;
     uint64_t data_start_ = 0, data_size_ = 0, data_bytes_ = 0;
     std::vector<uint8_t> text_, ro_, data_;
     LinkResult out_;

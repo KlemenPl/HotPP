@@ -102,7 +102,11 @@ int suspend_new(DWORD self) {
 
 } // namespace
 
-bool register_unwind_info(uint64_t) { return false; } // .pdata registration: see patcher (Windows)
+bool register_unwind_info(uint64_t) { return false; } // ELF only
+
+bool register_function_table(uint64_t table, uint64_t count, uint64_t image_base) {
+    return RtlAddFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(table), DWORD(count), image_base) != 0;
+}
 
 void mark_agent_thread() { g_agent_tid = GetCurrentThreadId(); }
 

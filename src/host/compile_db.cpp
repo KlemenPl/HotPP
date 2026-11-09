@@ -273,12 +273,14 @@ std::vector<std::string> patch_compile_arguments(const CompileCommand& cmd, cons
         // /Z7: debug info in the object, which the patch linker reads (no shared
         // compiler PDB to contend for). /Gy /Gw: one section per function and per
         // variable (see below).
-        std::vector<std::string> extra = {"/Z7", "/Gy", "/Gw", "/Fo" + output.string()};
+        // Forward slashes: cl and clang-cl accept them, and a native clang-cl run from
+        // a host under Wine needs them.
+        std::vector<std::string> extra = {"/Z7", "/Gy", "/Gw", "/hotpatch", "/Fo" + output.generic_string()};
         if (!depfile.empty()) {
             if (driver == Driver::Cl) {
-                extra.insert(extra.end(), {"/sourceDependencies", depfile.string()});
+                extra.insert(extra.end(), {"/sourceDependencies", depfile.generic_string()});
             } else {
-                extra.insert(extra.end(), {"/clang:-MMD", "/clang:-MF" + depfile.string()});
+                extra.insert(extra.end(), {"/clang:-MMD", "/clang:-MF" + depfile.generic_string()});
             }
         }
         out.insert(at, extra.begin(), extra.end());

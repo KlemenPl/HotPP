@@ -9,3 +9,5 @@ HOTPP_PRE_PATCH(on_pre);
 HOTPP_POST_PATCH(on_post);
 
 int value() { return 2; }
+
+int added_count() { return 0; } // v3 adds a hook and counts it here

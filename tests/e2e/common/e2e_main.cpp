@@ -4,9 +4,16 @@
 #include <hotpp/hotpp.h>
 
 #include <chrono>
+#include <cstdio>
 #include <thread>
 
-#include <unistd.h>
+namespace {
+bool exists(const char* path) {
+    std::FILE* f = std::fopen(path, "r");
+    if (f) std::fclose(f);
+    return f != nullptr;
+}
+} // namespace
 
 int main() {
     if (!hotpp::init()) {
@@ -20,7 +27,7 @@ int main() {
         case_frame(frame);
         std::printf("frame %d\n", frame);
         std::fflush(stdout);
-        if (stop && access(stop, F_OK) == 0) {
+        if (stop && exists(stop)) {
             const int rc = case_finish();
             std::printf(rc == 0 ? "PASS\n" : "FAIL: final state\n");
             std::fflush(stdout);

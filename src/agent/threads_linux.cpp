@@ -107,6 +107,8 @@ bool register_unwind_info(uint64_t eh_frame) {
     return true;
 }
 
+bool register_function_table(uint64_t, uint64_t, uint64_t) { return false; }
+
 void mark_agent_thread() { g_agent_tid = gettid_raw(); }
 
 bool pause_other_threads(std::vector<uint64_t>& stopped_at, std::string& error) {

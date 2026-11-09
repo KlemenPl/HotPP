@@ -53,6 +53,9 @@ uint64_t resolve_symbol(const std::string& name);
 // Makes the unwinder aware of a zero-terminated .eh_frame block. False if the
 // runtime offers no way to do so.
 bool register_unwind_info(uint64_t eh_frame);
+// Windows: registers `count` RUNTIME_FUNCTION entries at `table`, whose RVAs are
+// relative to `image_base`. False elsewhere or on failure.
+bool register_function_table(uint64_t table, uint64_t count, uint64_t image_base);
 
 // The calling thread is the agent's own; it is never paused.
 void mark_agent_thread();

@@ -45,6 +45,11 @@ constexpr uint32_t R_X86_64_NONE = 0, R_X86_64_64 = 1, R_X86_64_PC32 = 2, R_X86_
                    R_X86_64_SIZE32 = 32, R_X86_64_SIZE64 = 33, R_X86_64_GOTPC32_TLSDESC = 34,
                    R_X86_64_TLSDESC_CALL = 35, R_X86_64_GOTPCRELX = 41,
                    R_X86_64_REX_GOTPCRELX = 42;
+// Relocation types of COFF objects (object/coff_object.cpp) that ELF has no
+// equivalent for. COFF REL32 / REL32_k / ADDR32 / ADDR64 map onto the ELF types.
+constexpr uint32_t R_HOTPP_RVA32 = 0x10001;    // ADDR32NB: S + A - the image base
+constexpr uint32_t R_HOTPP_SECREL32 = 0x10002; // SECREL: offset of S + A in its section (TLS: in the TLS block)
+constexpr uint32_t R_HOTPP_SECTION16 = 0x10003; // SECTION: the section number of S (debug info only)
 // clang-format on
 
 struct Ehdr {

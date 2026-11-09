@@ -22,10 +22,17 @@ bool in_regions(uint64_t addr, uint64_t size, const std::vector<RegionRecord>& r
     return false;
 }
 
-// Bytes a patchable entry may hold: the 2-byte NOP the compiler emitted, or a short
-// jump written by an earlier patch.
-bool patchable_entry(const uint8_t* p) {
-    return (p[0] == 0x90 && p[1] == 0x90) || (p[0] == 0x66 && p[1] == 0x90) || p[0] == 0xEB;
+// Bytes a patchable entry may hold: a short jump written by an earlier patch, or
+// - with -fpatchable-function-entry, the 2-byte NOP the compiler emitted
+// - with /hotpatch (Windows), any instruction, with int3 or NOP padding before it
+bool patchable_entry(const uint8_t* p, const uint8_t* pad) {
+    if (p[0] == 0xEB) return true;
+    if (kPlatform == Platform::Windows) {
+        for (int i = 0; i < 5; ++i)
+            if (pad[i] != 0xCC && pad[i] != 0x90) return false;
+        return true;
+    }
+    return (p[0] == 0x90 && p[1] == 0x90) || (p[0] == 0x66 && p[1] == 0x90);
 }
 
 std::string at(const char* what, uint64_t addr) {
@@ -72,7 +79,7 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
             return at("patch site outside patchable code", site.entry_addr);
         const int64_t rel = int64_t(site.target - (site.pad_addr + 5));
         if (rel != int64_t(int32_t(rel))) return at("patch target out of rel32 range", site.target);
-        if (!patchable_entry(reinterpret_cast<const uint8_t*>(site.entry_addr)))
+        if (!patchable_entry(reinterpret_cast<const uint8_t*>(site.entry_addr), reinterpret_cast<const uint8_t*>(site.pad_addr)))
             return at("unexpected bytes at function entry", site.entry_addr);
     }
 
@@ -89,11 +96,24 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
         if (seg.prot & kProtExec) flush_icache(seg.addr, seg.size);
     }
 
-    // 2. Unwind tables, so exceptions can pass through the new code.
-    for (uint64_t frame : patch.eh_frames) {
-        if (!in_regions(frame, 4, regions)) return at("unwind table outside the patch region", frame);
-        if (!register_unwind_info(frame))
-            log("warning: no __register_frame in this process; exceptions thrown through patched code will terminate");
+    // 2. Unwind tables, so exceptions can pass through the new code. On Windows they
+    //    come as (table, entry count) pairs, relative to the region's module.
+    if (kPlatform == Platform::Windows) {
+        for (size_t i = 0; i + 1 < patch.eh_frames.size(); i += 2) {
+            const uint64_t table = patch.eh_frames[i], count = patch.eh_frames[i + 1];
+            const RegionRecord* region = nullptr;
+            for (const RegionRecord& r : regions)
+                if (inside(table, count * 12, r.base, r.size)) region = &r;
+            if (!region || region->module_index >= modules.size()) return at("unwind table outside the patch region", table);
+            if (!register_function_table(table, count, modules[region->module_index].base))
+                log("warning: RtlAddFunctionTable failed; exceptions thrown through patched code will terminate");
+        }
+    } else {
+        for (uint64_t frame : patch.eh_frames) {
+            if (!in_regions(frame, 4, regions)) return at("unwind table outside the patch region", frame);
+            if (!register_unwind_info(frame))
+                log("warning: no __register_frame in this process; exceptions thrown through patched code will terminate");
+        }
     }
 
     // 3. Dynamic initializers of new globals. They only see the patch's own code and

@@ -23,8 +23,17 @@ size_t nop_length(const uint8_t* p, size_t avail) {
 
 } // namespace
 
-std::optional<SiteLayout> analyze_patch_site(const uint8_t* bytes, size_t len) {
+std::optional<SiteLayout> analyze_patch_site(const uint8_t* bytes, size_t len, SiteStyle style) {
     if (len < kPadBytes + 2) return std::nullopt;
+    if (style == SiteStyle::Hotpatch) {
+        // int3 (or NOP) padding the linker put there; the entry instruction is
+        // replaced by the short jump, which /hotpatch makes safe.
+        for (size_t i = 0; i < kPadBytes; ++i)
+            if (bytes[i] != 0xCC && bytes[i] != 0x90) return std::nullopt;
+        SiteLayout layout;
+        layout.short_jump[1] = uint8_t(int8_t(-int(kPadBytes + 2)));
+        return layout;
+    }
     // The padding must be NOPs exactly covering 5 bytes: never executed, safe to overwrite.
     for (size_t pos = 0; pos < kPadBytes;) {
         const size_t n = nop_length(bytes + pos, kPadBytes - pos);

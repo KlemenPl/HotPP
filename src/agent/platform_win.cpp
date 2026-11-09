@@ -218,7 +218,31 @@ void flush_icache(uint64_t addr, uint64_t size) {
     FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(addr), size);
 }
 
+namespace {
+
+// Patch code throws through here instead of _CxxThrowException: that one finds the
+// image the throw information lives in with RtlPcToFileHeader, which fails for patch
+// memory. The patch linker made the throw information's RVAs relative to the
+// executable's base, so that's the base passed along (docs/DESIGN.md §13).
+extern "C" __declspec(noreturn) void __stdcall _CxxThrowException(void* object, void* throw_info);
+
+extern "C" __declspec(noreturn) void hotpp_cxx_throw(void* object, void* throw_info) {
+    if (!object && !throw_info) _CxxThrowException(nullptr, nullptr); // `throw;` rethrows the current one
+    constexpr ULONG_PTR kMagic = 0x19930520, kPureMagic = 0x01994000;
+    constexpr uint32_t kIsPure = 8; // ThrowInfo attributes: /clr:pure
+    uint32_t attributes = 0;
+    if (throw_info) std::memcpy(&attributes, throw_info, 4);
+    const ULONG_PTR args[4] = {(attributes & kIsPure) ? kPureMagic : kMagic, reinterpret_cast<ULONG_PTR>(object),
+                               reinterpret_cast<ULONG_PTR>(throw_info),
+                               reinterpret_cast<ULONG_PTR>(GetModuleHandleW(nullptr))};
+    RaiseException(0xE06D7363, EXCEPTION_NONCONTINUABLE, 4, args);
+    __assume(0);
+}
+
+} // namespace
+
 uint64_t resolve_symbol(const std::string& name) {
+    if (name == "__hotpp_cxx_throw") return reinterpret_cast<uint64_t>(&hotpp_cxx_throw);
     // Exports of every loaded module, the executable first.
     HMODULE exe = GetModuleHandleW(nullptr);
     if (FARPROC f = GetProcAddress(exe, name.c_str())) return reinterpret_cast<uint64_t>(f);

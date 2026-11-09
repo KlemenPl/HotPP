@@ -121,9 +121,9 @@ HOTPP_TEST(msvc_patch_arguments) {
     CHECK(has(out, "/Z7"));
     CHECK(has(out, "/Gy"));
     CHECK(has(out, "/Gw"));
-    CHECK(has(out, "/FoC:\\p\\x.obj"));
+    CHECK(has(out, "/Fo" + std::filesystem::path("C:\\p\\x.obj").generic_string()));
     CHECK(has(out, "/sourceDependencies"));
-    CHECK(has(out, "C:\\p\\x.json"));
+    CHECK(has(out, std::filesystem::path("C:\\p\\x.json").generic_string()));
 
     // clang-cl: options stay before `--`, dependencies through /clang:.
     cmd.arguments = {"clang-cl", "/nologo", "-Fox.obj", "/Z7", "/c", "--", "/home/s/x.cpp"};

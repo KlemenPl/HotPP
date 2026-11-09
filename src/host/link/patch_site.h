@@ -16,8 +16,14 @@ struct SiteLayout {
     uint8_t short_jump[2] = {0xEB, 0};
 };
 
+// PatchableEntry: -fpatchable-function-entry=7,5 (NOPs before and at the entry).
+// Hotpatch: /hotpatch + /FUNCTIONPADMIN (int3 or NOP padding before the entry,
+// whose first instruction the compiler makes at least 2 bytes long).
+enum class SiteStyle { PatchableEntry, Hotpatch };
+
 // `bytes` starts kPadBytes before the function entry and holds `len` bytes.
 // Returns the layout if the function can be redirected.
-std::optional<SiteLayout> analyze_patch_site(const uint8_t* bytes, size_t len);
+std::optional<SiteLayout> analyze_patch_site(const uint8_t* bytes, size_t len,
+                                             SiteStyle style = SiteStyle::PatchableEntry);
 
 } // namespace hotpp::link

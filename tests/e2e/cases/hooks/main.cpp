@@ -4,8 +4,7 @@
 
 extern int pre_count, post_count;
 int value();
-int added_count(); // only exists from v3 on; weak so v1 links
-__attribute__((weak)) int added_count() { return 0; }
+int added_count(); // 0 until v3 adds the hook it counts
 
 void case_setup() {}
 

@@ -8,6 +8,7 @@
 #include "host/image/dwarf_types.h"
 #include "host/image/elf_image.h"
 #include "host/link/symbol_index.h"
+#include "host/object/elf_object.h"
 #include "host/platform.h"
 #include "host/registry.h"
 #include "host/report.h"
@@ -64,7 +65,7 @@ private:
     struct ModuleState {
         size_t index = 0; // into hello_.modules
         std::string name;
-        std::unique_ptr<image::ElfImage> image;
+        std::unique_ptr<image::ModuleImage> image;
         link::SymbolIndex symbols;
         std::set<std::filesystem::path> units; // sources it was built from
         uint64_t region_base = 0, cursor = 0, end = 0; // its patch region
@@ -88,7 +89,8 @@ private:
     void remember(const std::filesystem::path& file);
     // Patches the changed ones among `files`. nullptr if there was nothing to patch.
     std::shared_ptr<PatchReport> handle_changes(const std::vector<std::filesystem::path>& files, const char* trigger);
-    void warn_layout_changes(ModuleState& module, const link::LinkResult& linked, PatchReport& report);
+    void warn_layout_changes(ModuleState& module, const link::LinkResult& linked,
+                             const std::vector<const object::ElfObject*>& objects, PatchReport& report);
     struct RestartResult {
         bool restarting = false; // the Restart message went out
         std::string outcome;     // restarting | build_failed | disconnected

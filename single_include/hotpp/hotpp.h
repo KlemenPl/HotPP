@@ -757,6 +757,21 @@ inline constexpr const char* kEndpointSuffix = "";
 inline constexpr const char* kEndpointSuffix = ".sock";
 #endif
 
+// An environment variable, or "" if unset.
+inline std::string env_value(const char* name) {
+#ifdef _WIN32
+    char* v = nullptr;
+    size_t n = 0;
+    if (_dupenv_s(&v, &n, name) != 0 || !v) return {};
+    std::string s = v;
+    std::free(v);
+    return s;
+#else
+    const char* v = std::getenv(name);
+    return v ? v : "";
+#endif
+}
+
 // Every endpoint of this user starts with this. $HOTPP_ENDPOINT_PREFIX overrides it
 // (tests use a private one).
 // - Linux: $XDG_RUNTIME_DIR is per-user and private; /tmp is the fallback, with the
@@ -764,14 +779,14 @@ inline constexpr const char* kEndpointSuffix = ".sock";
 // - Windows: pipe names are global, so the user name is part of it; the pipes
 //   themselves only admit this user.
 inline std::string endpoint_prefix() {
-    const char* custom = std::getenv("HOTPP_ENDPOINT_PREFIX");
-    if (custom && *custom) return custom;
+    const std::string custom = env_value("HOTPP_ENDPOINT_PREFIX");
+    if (!custom.empty()) return custom;
 #ifdef _WIN32
-    const char* user = std::getenv("USERNAME");
-    return std::string("\\\\.\\pipe\\hotpp-") + (user && *user ? user : "user");
+    const std::string user = env_value("USERNAME");
+    return std::string("\\\\.\\pipe\\hotpp-") + (user.empty() ? "user" : user);
 #else
-    const char* xdg = std::getenv("XDG_RUNTIME_DIR");
-    if (xdg && *xdg) return std::string(xdg) + "/hotpp";
+    const std::string xdg = env_value("XDG_RUNTIME_DIR");
+    if (!xdg.empty()) return xdg + "/hotpp";
     return "/tmp/hotpp-" + std::to_string(getuid());
 #endif
 }
@@ -840,6 +855,9 @@ uint64_t resolve_symbol(const std::string& name);
 // Makes the unwinder aware of a zero-terminated .eh_frame block. False if the
 // runtime offers no way to do so.
 bool register_unwind_info(uint64_t eh_frame);
+// Windows: registers `count` RUNTIME_FUNCTION entries at `table`, whose RVAs are
+// relative to `image_base`. False elsewhere or on failure.
+bool register_function_table(uint64_t table, uint64_t count, uint64_t image_base);
 
 // The calling thread is the agent's own; it is never paused.
 void mark_agent_thread();
@@ -1283,7 +1301,31 @@ void flush_icache(uint64_t addr, uint64_t size) {
     FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(addr), size);
 }
 
+namespace {
+
+// Patch code throws through here instead of _CxxThrowException: that one finds the
+// image the throw information lives in with RtlPcToFileHeader, which fails for patch
+// memory. The patch linker made the throw information's RVAs relative to the
+// executable's base, so that's the base passed along (docs/DESIGN.md §13).
+extern "C" __declspec(noreturn) void __stdcall _CxxThrowException(void* object, void* throw_info);
+
+extern "C" __declspec(noreturn) void hotpp_cxx_throw(void* object, void* throw_info) {
+    if (!object && !throw_info) _CxxThrowException(nullptr, nullptr); // `throw;` rethrows the current one
+    constexpr ULONG_PTR kMagic = 0x19930520, kPureMagic = 0x01994000;
+    constexpr uint32_t kIsPure = 8; // ThrowInfo attributes: /clr:pure
+    uint32_t attributes = 0;
+    if (throw_info) std::memcpy(&attributes, throw_info, 4);
+    const ULONG_PTR args[4] = {(attributes & kIsPure) ? kPureMagic : kMagic, reinterpret_cast<ULONG_PTR>(object),
+                               reinterpret_cast<ULONG_PTR>(throw_info),
+                               reinterpret_cast<ULONG_PTR>(GetModuleHandleW(nullptr))};
+    RaiseException(0xE06D7363, EXCEPTION_NONCONTINUABLE, 4, args);
+    __assume(0);
+}
+
+} // namespace
+
 uint64_t resolve_symbol(const std::string& name) {
+    if (name == "__hotpp_cxx_throw") return reinterpret_cast<uint64_t>(&hotpp_cxx_throw);
     // Exports of every loaded module, the executable first.
     HMODULE exe = GetModuleHandleW(nullptr);
     if (FARPROC f = GetProcAddress(exe, name.c_str())) return reinterpret_cast<uint64_t>(f);
@@ -1553,7 +1595,11 @@ int suspend_new(DWORD self) {
 
 } // namespace
 
-bool register_unwind_info(uint64_t) { return false; } // .pdata registration: see patcher (Windows)
+bool register_unwind_info(uint64_t) { return false; } // ELF only
+
+bool register_function_table(uint64_t table, uint64_t count, uint64_t image_base) {
+    return RtlAddFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(table), DWORD(count), image_base) != 0;
+}
 
 void mark_agent_thread() { g_agent_tid = GetCurrentThreadId(); }
 
@@ -2132,6 +2178,8 @@ bool register_unwind_info(uint64_t eh_frame) {
     return true;
 }
 
+bool register_function_table(uint64_t, uint64_t, uint64_t) { return false; }
+
 void mark_agent_thread() { g_agent_tid = gettid_raw(); }
 
 bool pause_other_threads(std::vector<uint64_t>& stopped_at, std::string& error) {
@@ -2277,10 +2325,17 @@ bool in_regions(uint64_t addr, uint64_t size, const std::vector<RegionRecord>& r
     return false;
 }
 
-// Bytes a patchable entry may hold: the 2-byte NOP the compiler emitted, or a short
-// jump written by an earlier patch.
-bool patchable_entry(const uint8_t* p) {
-    return (p[0] == 0x90 && p[1] == 0x90) || (p[0] == 0x66 && p[1] == 0x90) || p[0] == 0xEB;
+// Bytes a patchable entry may hold: a short jump written by an earlier patch, or
+// - with -fpatchable-function-entry, the 2-byte NOP the compiler emitted
+// - with /hotpatch (Windows), any instruction, with int3 or NOP padding before it
+bool patchable_entry(const uint8_t* p, const uint8_t* pad) {
+    if (p[0] == 0xEB) return true;
+    if (kPlatform == Platform::Windows) {
+        for (int i = 0; i < 5; ++i)
+            if (pad[i] != 0xCC && pad[i] != 0x90) return false;
+        return true;
+    }
+    return (p[0] == 0x90 && p[1] == 0x90) || (p[0] == 0x66 && p[1] == 0x90);
 }
 
 std::string at(const char* what, uint64_t addr) {
@@ -2327,7 +2382,7 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
             return at("patch site outside patchable code", site.entry_addr);
         const int64_t rel = int64_t(site.target - (site.pad_addr + 5));
         if (rel != int64_t(int32_t(rel))) return at("patch target out of rel32 range", site.target);
-        if (!patchable_entry(reinterpret_cast<const uint8_t*>(site.entry_addr)))
+        if (!patchable_entry(reinterpret_cast<const uint8_t*>(site.entry_addr), reinterpret_cast<const uint8_t*>(site.pad_addr)))
             return at("unexpected bytes at function entry", site.entry_addr);
     }
 
@@ -2344,11 +2399,24 @@ std::string apply_patch(const Patch& patch, const std::vector<RegionRecord>& reg
         if (seg.prot & kProtExec) flush_icache(seg.addr, seg.size);
     }
 
-    // 2. Unwind tables, so exceptions can pass through the new code.
-    for (uint64_t frame : patch.eh_frames) {
-        if (!in_regions(frame, 4, regions)) return at("unwind table outside the patch region", frame);
-        if (!register_unwind_info(frame))
-            log("warning: no __register_frame in this process; exceptions thrown through patched code will terminate");
+    // 2. Unwind tables, so exceptions can pass through the new code. On Windows they
+    //    come as (table, entry count) pairs, relative to the region's module.
+    if (kPlatform == Platform::Windows) {
+        for (size_t i = 0; i + 1 < patch.eh_frames.size(); i += 2) {
+            const uint64_t table = patch.eh_frames[i], count = patch.eh_frames[i + 1];
+            const RegionRecord* region = nullptr;
+            for (const RegionRecord& r : regions)
+                if (inside(table, count * 12, r.base, r.size)) region = &r;
+            if (!region || region->module_index >= modules.size()) return at("unwind table outside the patch region", table);
+            if (!register_function_table(table, count, modules[region->module_index].base))
+                log("warning: RtlAddFunctionTable failed; exceptions thrown through patched code will terminate");
+        }
+    } else {
+        for (uint64_t frame : patch.eh_frames) {
+            if (!in_regions(frame, 4, regions)) return at("unwind table outside the patch region", frame);
+            if (!register_unwind_info(frame))
+                log("warning: no __register_frame in this process; exceptions thrown through patched code will terminate");
+        }
     }
 
     // 3. Dynamic initializers of new globals. They only see the patch's own code and

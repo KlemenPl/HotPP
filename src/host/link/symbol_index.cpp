@@ -1,12 +1,13 @@
 #include "host/link/symbol_index.h"
 
-#include "host/image/elf_image.h"
+#include "host/image/module_image.h"
 
 namespace hotpp::link {
 
 using namespace hotpp::elf;
 
-void SymbolIndex::add_image(const image::ElfImage& image, uint64_t base) {
+void SymbolIndex::add_image(const image::ModuleImage& image, uint64_t base) {
+    const SiteStyle style = image.site_style() == image::SiteStyle::Hotpatch ? SiteStyle::Hotpatch : SiteStyle::PatchableEntry;
     for (const image::ImageSymbol& s : image.symbols()) {
         IndexEntry e;
         switch (s.type) {
@@ -24,7 +25,7 @@ void SymbolIndex::add_image(const image::ElfImage& image, uint64_t base) {
             FunctionVersion v;
             v.entry = e.address;
             if (s.value >= kPadBytes && image.read(s.value - kPadBytes, sizeof probe, probe))
-                v.site = analyze_patch_site(probe, sizeof probe);
+                v.site = analyze_patch_site(probe, sizeof probe, style);
             e.versions.push_back(v);
         }
 
@@ -40,6 +41,17 @@ void SymbolIndex::add(const SymbolKey& key, const IndexEntry& entry) {
 const IndexEntry* SymbolIndex::find(const SymbolKey& key) const {
     auto it = entries_.find(key.str());
     return it == entries_.end() ? nullptr : &it->second;
+}
+
+const IndexEntry* SymbolIndex::find_global_prefix(const std::string& prefix, const std::string& except,
+                                                   std::string& name) const {
+    for (const auto& [key, e] : entries_)
+        if (key.size() > prefix.size() && key.compare(0, prefix.size(), prefix) == 0 && key != except &&
+            key.find('\x1f') == std::string::npos) {
+            name = key;
+            return &e;
+        }
+    return nullptr;
 }
 
 bool SymbolIndex::rebind(const SymbolKey& key, uint64_t address) {

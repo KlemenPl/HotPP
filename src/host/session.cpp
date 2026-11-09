@@ -1,12 +1,14 @@
 #include "host/session.h"
 
 #include "host/deps.h"
+#include "host/image/codeview.h"
 #include "host/session_state.h"
 #include "host/image/dwarf_types.h"
 #include "host/link/linker.h"
 #include "host/object/elf_object.h"
 
 #include <algorithm>
+#include <cctype>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -178,20 +180,31 @@ void Session::say(const std::string& line, const char* kind) const {
 
 // Structs whose layout in the patch differs from the running program's: objects
 // created before the patch keep the old layout, which the new code would misread.
-void Session::warn_layout_changes(ModuleState& module, const link::LinkResult& linked, PatchReport& report) {
+void Session::warn_layout_changes(ModuleState& module, const link::LinkResult& linked,
+                                  const std::vector<const object::ElfObject*>& objects, PatchReport& report) {
     {
         std::unique_lock<std::mutex> lock(scan_mutex_);
         scan_cv_.wait(lock, [&] { return layouts_ready_ || stop_.load(); });
     }
     if (!module.layouts_ok) return;
-    std::set<std::string> reported;
+    // The patch objects' layouts: DWARF in the debug objects (ELF), CodeView in the
+    // objects themselves (COFF).
+    std::vector<std::unordered_map<std::string, image::TypeLayout>> per_object;
     for (const auto& object : linked.patch.debug_objects) {
-        std::unordered_map<std::string, image::TypeLayout> mine;
         try {
-            mine = image::dwarf_type_layouts(elf::ElfFile::from_bytes(object, "patch object"));
+            per_object.push_back(image::dwarf_type_layouts(elf::ElfFile::from_bytes(object, "patch object")));
         } catch (const std::exception&) {
-            continue;
         }
+    }
+    for (const object::ElfObject* o : objects)
+        for (const auto& [data, size] : o->codeview_types) {
+            try {
+                per_object.push_back(codeview::type_layouts(codeview::TypeTable::parse(data, size)));
+            } catch (const std::exception&) {
+            }
+        }
+    std::set<std::string> reported;
+    for (const auto& mine : per_object) {
         for (auto& [name, layout] : mine) {
             auto old = module.layouts.find(name);
             if (old == module.layouts.end() || old->second == layout || !reported.insert(name).second) continue;
@@ -347,7 +360,6 @@ Session::Outcome Session::run(const std::vector<uint8_t>& hello_payload) {
 void Session::start_hot_reload() {
 #ifdef _WIN32
     if (hello_.platform != Platform::Windows) throw std::runtime_error("this host patches Windows programs only");
-    throw std::runtime_error("patching Windows programs is not implemented yet");
 #else
     if (hello_.platform != Platform::Linux) throw std::runtime_error("this host patches Linux programs only");
 #endif
@@ -375,9 +387,20 @@ void Session::start_hot_reload() {
 namespace {
 // System libraries are never built from the project's sources; skip reading them.
 bool system_library(const std::string& path) {
+#ifdef _WIN32
+    std::string lower = path;
+    for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+    if (const char* root = std::getenv("SystemRoot")) {
+        std::string r = root;
+        for (char& c : r) c = char(std::tolower(static_cast<unsigned char>(c)));
+        if (!r.empty() && lower.rfind(r, 0) == 0) return true;
+    }
+    return path.empty() || lower.find("\\windows\\system32\\") != std::string::npos;
+#else
     for (const char* prefix : {"/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/", "/usr/libexec/"})
         if (path.rfind(prefix, 0) == 0) return true;
     return path.empty() || path.find("linux-vdso") != std::string::npos;
+#endif
 }
 } // namespace
 
@@ -388,11 +411,13 @@ Session::ModuleState* Session::track_module(size_t i) {
     const ModuleRecord& rec = hello_.modules[i];
     const bool exe = i == 0;
     if (rec.size == 0 || (!exe && system_library(rec.path))) return nullptr;
+    // DLLs aren't patched yet on Windows.
+    if (!exe && hello_.platform == Platform::Windows) return nullptr;
     auto m = std::make_shared<ModuleState>();
     m->index = i;
     m->name = fs::path(rec.path).filename().string();
     try {
-        m->image = image::ElfImage::load(rec.path);
+        m->image = image::load_module_image(rec.path);
     } catch (const std::exception&) {
         if (exe) throw;
         return nullptr; // stripped or unreadable: not ours
@@ -401,8 +426,8 @@ Session::ModuleState* Session::track_module(size_t i) {
     bool ours = false;
     for (const fs::path& u : m->units) ours |= db_->find(u) != nullptr;
     if (exe && m->units.empty()) {
-        say("warning: " + m->name + " has no usable DWARF info" +
-            (m->image->dwarf_warning().empty() ? "" : " (" + m->image->dwarf_warning() + ")") +
+        say("warning: " + m->name + " has no usable debug info" +
+            (m->image->debug_warning().empty() ? "" : " (" + m->image->debug_warning() + ")") +
             "; every file in compile_commands.json is treated as part of it");
         for (const CompileCommand& c : db_->entries()) m->units.insert(c.file);
         ours = true;
@@ -434,7 +459,7 @@ Session::ModuleState* Session::track_module(size_t i) {
     m->cursor = region.base + region.used;
     m->end = region.base + region.size;
     m->symbols.add_image(*m->image, rec.base);
-    if (!exe) bind_interposed_variables(*m);
+    if (!exe && hello_.platform == Platform::Linux) bind_interposed_variables(*m);
     for (const fs::path& u : m->units) units_.insert(u);
     modules_.push_back(std::move(m));
     return modules_.back().get();
@@ -497,7 +522,7 @@ void Session::setup_modules() {
         for (const auto& m : modules) { // the snapshot: modules_ may change meanwhile
             if (stop_) break;
             try {
-                m->layouts = image::dwarf_type_layouts(m->image->file());
+                m->layouts = m->image->type_layouts();
                 m->layouts_ok = true;
             } catch (const std::exception& e) {
                 say("warning: can't read struct layouts of " + m->name + " (" + e.what() + "); no layout warnings");
@@ -666,7 +691,7 @@ void Session::apply_module_changes() {
                               std::max(1u, std::thread::hardware_concurrency()), graph_, &stop_);
             watch_headers();
             try {
-                m->layouts = image::dwarf_type_layouts(m->image->file());
+                m->layouts = m->image->type_layouts();
                 m->layouts_ok = true;
             } catch (const std::exception&) {
             }
@@ -981,7 +1006,7 @@ std::shared_ptr<PatchReport> Session::handle_changes(const std::vector<fs::path>
         graph_.set(j.cmd->file, read_dependencies(*j.cmd, j.depfile));
         if (failure) continue;
         try {
-            objects.push_back(object::ElfObject::load(j.out));
+            objects.push_back(object::load_object(j.out));
         } catch (const std::exception& e) {
             failure = "link_failed";
             error = e.what();
@@ -1017,6 +1042,7 @@ std::shared_ptr<PatchReport> Session::handle_changes(const std::vector<fs::path>
             opt.tls_static = rec.tls_static;
             opt.tls_offset = rec.tls_offset;
             opt.tls_module_id = rec.tls_module_id;
+            opt.image_base = hello_.platform == Platform::Windows ? rec.base : 0;
             l.result = link::link_patch(
                 l.objects, l.module->symbols, [this](const std::vector<std::string>& n) { return resolve_external(n); },
                 opt);
@@ -1057,7 +1083,7 @@ std::shared_ptr<PatchReport> Session::handle_changes(const std::vector<fs::path>
             report->notes.push_back(note);
         }
         l.module->pending_layouts.clear();
-        warn_layout_changes(*l.module, l.result, *report);
+        warn_layout_changes(*l.module, l.result, l.objects, *report);
         proto::Patch& p = l.result.patch;
         patch.segments.insert(patch.segments.end(), p.segments.begin(), p.segments.end());
         patch.sites.insert(patch.sites.end(), p.sites.begin(), p.sites.end());
@@ -1104,7 +1130,7 @@ std::shared_ptr<PatchReport> Session::handle_changes(const std::vector<fs::path>
                 const uint64_t lo = rec.base + sym.value, hi = lo + sym.size;
                 const bool replaced = std::any_of(l.result.patch.sites.begin(), l.result.patch.sites.end(),
                                                   [&](const PatchSite& s) { return s.entry_addr >= lo && s.entry_addr < hi; });
-                const std::string name = function_name(sym.name);
+                const std::string name = function_name(codeview::bridge_display(sym.name));
                 if (replaced && std::find(running.begin(), running.end(), name) == running.end()) running.push_back(name);
                 break;
             }

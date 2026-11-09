@@ -654,6 +654,7 @@ int wait_child(int pid, const std::function<void()>& on_signal) {
     HANDLE h = child_process(pid);
     if (!h) return -1;
     int seen = g_stop_requests.load();
+    // WAIT_FAILED: a native program under Wine (see run_capture).
     while (WaitForSingleObject(h, 100) == WAIT_TIMEOUT) {
         const int now = g_stop_requests.load();
         if (now != seen) {
@@ -704,8 +705,99 @@ bool process_alive(uint32_t pid) {
     return alive;
 }
 
+namespace {
+
+bool under_wine() {
+    static const bool wine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
+    return wine;
+}
+
+// Wine's own export: the Unix path of a Windows path (allocated on the process heap).
+std::string unix_path(const std::filesystem::path& p) {
+    using Fn = char*(CDECL*)(const wchar_t*);
+    static const auto fn = reinterpret_cast<Fn>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "wine_get_unix_file_name")));
+    if (!fn) return {};
+    char* u = fn(std::filesystem::absolute(p).wstring().c_str());
+    if (!u) return {};
+    std::string out = u;
+    HeapFree(GetProcessHeap(), 0, u);
+    return out;
+}
+
+std::string shell_quote(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) out += c == '\'' ? std::string("'\\''") : std::string(1, c);
+    return out + "'";
+}
+
+std::string read_whole(const std::filesystem::path& p) {
+    std::string out;
+    if (FILE* f = _wfopen(p.c_str(), L"rb")) {
+        char buf[4096];
+        for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) out.append(buf, n);
+        std::fclose(f);
+    }
+    return out;
+}
+
+// Under Wine, a Linux program (a cross build's compiler) runs natively, but Wine
+// neither redirects its standard handles nor lets its process handle be waited for.
+// The shell redirects its output to a file and writes its exit status to another.
+int run_native_under_wine(const std::vector<std::string>& args, const std::filesystem::path& cwd, std::string& output,
+                          std::string& error) {
+    static std::atomic<int> counter{0};
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    const std::filesystem::path base =
+        std::filesystem::path(tmp) / ("hotpp-run-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(counter++));
+    const std::filesystem::path out_file = base.wstring() + L".out", status_file = base.wstring() + L".status";
+    const std::string out_u = unix_path(out_file), status_u = unix_path(status_file);
+    const std::string cwd_u = cwd.empty() ? std::string() : unix_path(cwd);
+    if (out_u.empty() || status_u.empty()) {
+        error = "can't map paths for " + args[0] + " under Wine";
+        return -1;
+    }
+    std::string script = cwd_u.empty() ? std::string() : "cd " + shell_quote(cwd_u) + " && ";
+    script += "\"$@\" >" + shell_quote(out_u) + " 2>&1; echo $? >" + shell_quote(status_u + ".tmp") + "; mv " +
+              shell_quote(status_u + ".tmp") + " " + shell_quote(status_u);
+    std::vector<std::string> argv = {"/bin/sh", "-c", script, "sh"};
+    argv.insert(argv.end(), args.begin(), args.end());
+    SpawnOptions opt;
+    opt.null_stdin = true;
+    const int pid = start(argv, opt, nullptr, error);
+    if (pid < 0) return -1;
+    {
+        // Its handle is of no use (see above).
+        std::lock_guard<std::mutex> lock(g_children_mutex);
+        auto it = g_children.find(pid);
+        if (it != g_children.end()) {
+            CloseHandle(it->second.process);
+            if (it->second.job) CloseHandle(it->second.job);
+            g_children.erase(it);
+        }
+    }
+    std::error_code ec;
+    for (int waited = 0; !std::filesystem::exists(status_file, ec); waited += 10) {
+        if (waited > 30 * 60 * 1000) {
+            error = args[0] + " didn't finish";
+            return -1;
+        }
+        Sleep(10);
+    }
+    output = read_whole(out_file);
+    const int code = std::atoi(read_whole(status_file).c_str());
+    std::filesystem::remove(out_file, ec);
+    std::filesystem::remove(status_file, ec);
+    return code;
+}
+
+} // namespace
+
 int run_capture(const std::vector<std::string>& args, const std::filesystem::path& cwd, std::string& output,
                 std::string& error) {
+    if (under_wine() && !args.empty() && !args[0].empty() && args[0][0] == '/')
+        return run_native_under_wine(args, cwd, output, error);
     Pipe p;
     if (!make_pipe(p, error)) return -1;
     SpawnOptions opt;
@@ -766,7 +858,11 @@ std::string demangle(const std::string& name) {
                                          UNDNAME_NO_MS_KEYWORDS | UNDNAME_NO_ACCESS_SPECIFIERS | UNDNAME_NO_FUNCTION_RETURNS |
                                              UNDNAME_NO_ALLOCATION_MODEL | UNDNAME_NO_ALLOCATION_LANGUAGE |
                                              UNDNAME_NO_MEMBER_TYPE | UNDNAME_NO_THROW_SIGNATURES);
-    return n ? std::string(buf, n) : name;
+    if (!n) return name;
+    std::string out(buf, n);
+    // "f(void)" reads as "f()" elsewhere.
+    for (size_t at; (at = out.find("(void)")) != std::string::npos;) out.replace(at, 6, "()");
+    return out;
 }
 
 // ---- console events and stdio --------------------------------------------------

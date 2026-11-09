@@ -11,7 +11,7 @@
 #include <vector>
 
 namespace hotpp::image {
-class ElfImage;
+class ModuleImage;
 }
 
 namespace hotpp::link {
@@ -60,12 +60,14 @@ struct IndexDelta {
 
 class SymbolIndex {
 public:
-    // Adds the executable's symbols; `base` is its load bias.
-    void add_image(const image::ElfImage& image, uint64_t base);
+    // Adds a module's symbols; `base` is its load bias (ELF) or image base (PE).
+    void add_image(const image::ModuleImage& image, uint64_t base);
 
     // Adds one symbol; an existing local with the same key becomes ambiguous.
     void add(const SymbolKey& key, const IndexEntry& entry);
     const IndexEntry* find(const SymbolKey& key) const;
+    // A global whose name starts with `prefix` (and isn't `except`), if any.
+    const IndexEntry* find_global_prefix(const std::string& prefix, const std::string& except, std::string& name) const;
     // Points an existing variable at different storage (where the dynamic linker
     // actually bound it). False if there is no such entry.
     bool rebind(const SymbolKey& key, uint64_t address);

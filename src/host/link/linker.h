@@ -36,8 +36,11 @@ struct LinkOptions {
     bool tls_static = false;
     int64_t tls_offset = 0;
     uint64_t tls_module_id = 0;
-    // Also produce debugger objects (docs/DESIGN.md §9).
+    // Also produce debugger objects (docs/DESIGN.md §9). ELF only.
     bool debug_objects = true;
+    // PE: the module's image base, which RVAs (ADDR32NB relocations, unwind tables)
+    // are relative to. The patch region lies above it, within 4 GB.
+    uint64_t image_base = 0;
 };
 
 struct LinkResult {

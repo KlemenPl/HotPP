@@ -73,12 +73,15 @@ if(HOTPP_BUILD_HOST)
         src/host/session.cpp
         src/host/session_state.cpp
         src/host/elf/elf_file.cpp
+        src/host/image/codeview.cpp
         src/host/image/dwarf.cpp
         src/host/image/dwarf_reader.cpp
         src/host/image/elf_image.cpp
+        src/host/image/pe_image.cpp
         src/host/link/linker.cpp
         src/host/link/patch_site.cpp
         src/host/link/symbol_index.cpp
+        src/host/object/coff_object.cpp
         src/host/object/elf_object.cpp
         src/host/platform_${HOTPP_OS}.cpp
         src/host/util/json.cpp

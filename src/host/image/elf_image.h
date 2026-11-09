@@ -3,6 +3,7 @@
 #pragma once
 
 #include "host/elf/elf_file.h"
+#include "host/image/module_image.h"
 
 #include <filesystem>
 #include <memory>
@@ -11,32 +12,25 @@
 
 namespace hotpp::image {
 
-struct ImageSymbol {
-    std::string name;
-    std::string file; // STT_FILE scope; meaningful for local symbols
-    uint64_t value = 0;
-    uint64_t size = 0;
-    uint8_t bind = 0, type = 0, visibility = 0;
-    uint32_t shndx = 0;
-};
-
-class ElfImage {
+class ElfImage final : public ModuleImage {
 public:
     static std::unique_ptr<ElfImage> load(const std::filesystem::path& path);
     static std::unique_ptr<ElfImage> from_file(elf::ElfFile file);
 
     const elf::ElfFile& file() const { return file_; }
     uint16_t type() const { return file_.header().type; }
-    const std::vector<ImageSymbol>& symbols() const { return symbols_; }
-    const std::vector<uint8_t>& build_id() const { return build_id_; }
+    const std::vector<ImageSymbol>& symbols() const override { return symbols_; }
+    const std::vector<uint8_t>& build_id() const override { return build_id_; }
     // Absolute source paths of the DWARF compile units; empty without debug info.
-    const std::vector<std::filesystem::path>& compile_units() const { return compile_units_; }
-    const std::string& dwarf_warning() const { return dwarf_warning_; }
+    const std::vector<std::filesystem::path>& compile_units() const override { return compile_units_; }
+    const std::string& debug_warning() const override { return dwarf_warning_; }
 
-    bool section_writable(uint32_t shndx) const;
+    bool section_writable(uint32_t shndx) const override;
     // Copies `n` bytes at link-time virtual address `vaddr` from the file. False if
     // the range is not fully file-backed.
-    bool read(uint64_t vaddr, size_t n, uint8_t* out) const;
+    bool read(uint64_t vaddr, size_t n, uint8_t* out) const override;
+    SiteStyle site_style() const override { return SiteStyle::PatchableEntry; }
+    std::unordered_map<std::string, TypeLayout> type_layouts() const override;
 
 private:
     elf::ElfFile file_;

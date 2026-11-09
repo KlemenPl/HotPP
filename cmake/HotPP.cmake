@@ -44,11 +44,12 @@ function(hotpp_enable target)
     if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
         # MSVC and clang-cl (docs/DESIGN.md §4):
         #   /Z7          debug info in the objects; the linker writes a full PDB
+        #   /Gy          each function in its own section (needed for /FUNCTIONPADMIN)
         #   /hotpatch    every function starts with an instruction of 2+ bytes
         #   /FUNCTIONPADMIN  padding before every function for the patch-site jump
         #   /OPT:NOREF /OPT:NOICF  keep "unused" and identical functions separate
         #   /INCREMENTAL:NO  no incremental-link thunks in front of functions
-        target_compile_options(${target} PRIVATE /Z7 /hotpatch)
+        target_compile_options(${target} PRIVATE /Z7 /Gy /hotpatch)
         if(type STREQUAL "EXECUTABLE" OR type MATCHES "SHARED_LIBRARY|MODULE_LIBRARY")
             target_link_options(${target} PRIVATE /DEBUG:FULL /FUNCTIONPADMIN /OPT:NOREF /OPT:NOICF /INCREMENTAL:NO)
         endif()

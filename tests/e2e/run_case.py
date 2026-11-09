@@ -107,7 +107,9 @@ def main() -> int:
     ap.add_argument("--build-dir", help="CMake build tree, for {build_dir} in host_args")
     ap.add_argument("--target", help="the program's CMake target, for {target} in host_args")
     ap.add_argument("--step-timeout", type=float, default=40)
+    ap.add_argument("--emulator", default="", help="command (parts separated by |) that runs the host: wine, for cross builds")
     args = ap.parse_args()
+    emulator = [a for a in args.emulator.split("|") if a]
 
     with open(os.path.join(args.case, "case.json")) as f:
         spec = json.load(f)
@@ -133,7 +135,9 @@ def main() -> int:
     env = dict(os.environ, HOTPP_E2E_STOP=stop_file, HOTPP_E2E_STATE=state_file, **spec.get("env", {}))
     expand = lambda a: a.format(build_dir=args.build_dir, target=args.target)
     host_args = [expand(a) for a in spec.get("host_args", [])]
-    popen = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+    popen = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    if os.name == "posix":
+        popen["start_new_session"] = True
     procs = []
     host_cmd = None
     if spec.get("serve"):
@@ -154,7 +158,7 @@ def main() -> int:
         procs.append(subprocess.Popen(["gdb", "-q", "-batch", "-nx", "-iex", "set debuginfod enabled off",
                                        "-x", script, "--args", args.exe], env=env, **popen))
     else:
-        procs.append(subprocess.Popen([args.host, *host_args, "--", args.exe], env=env, **popen))
+        procs.append(subprocess.Popen([*emulator, args.host, *host_args, "--", args.exe], env=env, **popen))
     out = Output(procs)
     error = None
     try:
@@ -195,7 +199,10 @@ def main() -> int:
     finally:
         for proc in procs:
             if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGKILL)
+                if os.name == "posix":
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
                 proc.wait()
         for path, (content, st) in originals.items():
             with open(path, "wb") as f:

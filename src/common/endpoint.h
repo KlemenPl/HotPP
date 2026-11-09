@@ -18,6 +18,21 @@ inline constexpr const char* kEndpointSuffix = "";
 inline constexpr const char* kEndpointSuffix = ".sock";
 #endif
 
+// An environment variable, or "" if unset.
+inline std::string env_value(const char* name) {
+#ifdef _WIN32
+    char* v = nullptr;
+    size_t n = 0;
+    if (_dupenv_s(&v, &n, name) != 0 || !v) return {};
+    std::string s = v;
+    std::free(v);
+    return s;
+#else
+    const char* v = std::getenv(name);
+    return v ? v : "";
+#endif
+}
+
 // Every endpoint of this user starts with this. $HOTPP_ENDPOINT_PREFIX overrides it
 // (tests use a private one).
 // - Linux: $XDG_RUNTIME_DIR is per-user and private; /tmp is the fallback, with the
@@ -25,14 +40,14 @@ inline constexpr const char* kEndpointSuffix = ".sock";
 // - Windows: pipe names are global, so the user name is part of it; the pipes
 //   themselves only admit this user.
 inline std::string endpoint_prefix() {
-    const char* custom = std::getenv("HOTPP_ENDPOINT_PREFIX");
-    if (custom && *custom) return custom;
+    const std::string custom = env_value("HOTPP_ENDPOINT_PREFIX");
+    if (!custom.empty()) return custom;
 #ifdef _WIN32
-    const char* user = std::getenv("USERNAME");
-    return std::string("\\\\.\\pipe\\hotpp-") + (user && *user ? user : "user");
+    const std::string user = env_value("USERNAME");
+    return std::string("\\\\.\\pipe\\hotpp-") + (user.empty() ? "user" : user);
 #else
-    const char* xdg = std::getenv("XDG_RUNTIME_DIR");
-    if (xdg && *xdg) return std::string(xdg) + "/hotpp";
+    const std::string xdg = env_value("XDG_RUNTIME_DIR");
+    if (!xdg.empty()) return xdg + "/hotpp";
     return "/tmp/hotpp-" + std::to_string(getuid());
 #endif
 }
