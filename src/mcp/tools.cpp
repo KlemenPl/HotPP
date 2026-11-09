@@ -653,6 +653,7 @@ ToolResult HotppTools::restart(const Args& a, CallContext& ctx) {
     if (outcome == "restarted") {
         Hosts::Program now = p;
         now.info = *field(r, "program");
+        now.pid = uint32_t(num(now.info, "pid", p.pid)); // another process on Windows
         std::string text = (built ? "Rebuilt and restarted " : "Restarted ") + name + ": " + describe(now) + ".";
         if (rebuild && !built)
             text += "\nThe host has no build command, so it restarted the program as built (pass build_command to "

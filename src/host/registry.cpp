@@ -157,9 +157,20 @@ std::vector<std::shared_ptr<SessionHandle>> Registry::list() const {
         auto& n = newest[s->pid()];
         if (!n || s->session() > n->session()) n = s;
     }
+    // On Windows the program continues as another process: once that one has
+    // connected, the replaced process is no longer the program either.
+    auto replaced = [&](uint32_t pid) {
+        for (int hops = 0; hops < 64; ++hops) {
+            auto next = successors_.find(pid);
+            if (next == successors_.end()) return false;
+            pid = next->second;
+            if (newest.count(pid)) return true;
+        }
+        return false;
+    };
     std::vector<std::shared_ptr<SessionHandle>> out;
     for (const auto& s : sessions_)
-        if (newest[s->pid()] == s) out.push_back(s);
+        if (newest[s->pid()] == s && !replaced(s->pid())) out.push_back(s);
     return out;
 }
 

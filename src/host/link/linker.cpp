@@ -58,6 +58,7 @@ struct InitEntry {
     size_t order = 0;
     Target target;
     std::set<std::pair<size_t, uint32_t>> closure; // text sections of this initializer
+    std::string variable; // MSVC: the variable a ??__E<name> initializer is for
 };
 
 bool starts_with(const std::string& s, const char* prefix) { return s.rfind(prefix, 0) == 0; }
@@ -77,6 +78,19 @@ bool is_initializer_function(const std::string& n) {
            starts_with(n, "__cxx_global_var_init") || starts_with(n, "__cxx_global_array_dtor") ||
            n.find("__static_initialization_and_destruction") != std::string::npos || starts_with(n, "__tcf_") ||
            starts_with(n, "__dtor_") || starts_with(n, "??__E") || starts_with(n, "??__F");
+}
+
+// The unqualified identifier in an MSVC name: "??__Ex@@YAXXZ" (x's dynamic
+// initializer), "?x@ns@@3HA", or a static's bridge key ("\x1ex:..."). Empty otherwise.
+std::string msvc_identifier(const std::string& n) {
+    size_t from = 0;
+    char stop = '@';
+    if (starts_with(n, "??__E")) from = 5;
+    else if (starts_with(n, "\x1e")) from = 1, stop = ':';
+    else if (starts_with(n, "?") && !starts_with(n, "??")) from = 1;
+    else return {};
+    const size_t end = n.find(stop, from);
+    return end == std::string::npos || end == from ? std::string() : n.substr(from, end - from);
 }
 
 bool named(const ObjSymbol& s) {
@@ -530,6 +544,8 @@ private:
                         throw LinkError("initializer in " + file_of(ob) + " is not in the patch's code");
                     t.value += uint64_t(r.addend);
                     InitEntry e;
+                    if (coff(ob) && starts_with(ob.symbols[r.sym()].name, "??__E"))
+                        e.variable = msvc_identifier(ob.symbols[r.sym()].name);
                     e.priority = init_priority(ob.sections[i].name);
                     e.order = entries.size();
                     e.target = t;
@@ -574,6 +590,19 @@ private:
                     if (tss.bound_old) old_data.insert({o, ts});
                     else new_data = true;
                 }
+            // MSVC may initialize the variable statically and leave its initializer
+            // only the side effects (cl /O2 does for hook registrars): the
+            // initializer of a new variable runs even if it writes no new data.
+            if (!new_data && !e.variable.empty()) {
+                const ElfObject& ob = obj(e.target.obj);
+                for (size_t k = 0; k < ob.symbols.size() && !new_data; ++k) {
+                    const ObjSymbol& s = ob.symbols[k];
+                    if (s.type != STT_OBJECT || !s.defined() || s.shndx >= st_[e.target.obj].secs.size()) continue;
+                    const SecState& ss = st_[e.target.obj].secs[s.shndx];
+                    new_data = is_data(ss.kind) && !ss.discarded && !st_[e.target.obj].existing[k] &&
+                               msvc_identifier(s.name) == e.variable;
+                }
+            }
             if (!new_data) {
                 out_.log.push_back("skip  initializer in " + file_of(obj(e.target.obj)) + " (its variables all exist)");
                 continue;
